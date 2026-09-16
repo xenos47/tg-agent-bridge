@@ -1,8 +1,5 @@
 allow_send: false
 
-telegram:
-  port: 443
-
 rate_limits:
   global_per_hour: 20
   peer_per_hour: 5

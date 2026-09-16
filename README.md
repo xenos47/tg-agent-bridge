@@ -43,22 +43,45 @@ flowchart TD
 
 ```bash
 uv sync --dev
-cp watchlist.example.yaml watchlist.yaml
-export TGQ_DB="$HOME/.local/share/tgq/messages.sqlite"
+mkdir -p "$HOME/.config/tgq" "$HOME/.local/share/tgq"
+cp config.example.yaml "$HOME/.config/tgq/config.yaml"
+cp watchlist.example.yaml "$HOME/.config/tgq/watchlist.yaml"
 export TGQ_API_ID="..."
 export TGQ_API_HASH="..."
 ```
 
 Credentials may instead be stored in `~/.config/tgq/secrets.env`, which must
-have mode `0600`. The Telethon session defaults to `tgq.session`; keep it local.
+have mode `0600`. They are never accepted in `config.yaml`. The example settings
+file keeps the unencrypted mirror and Telethon session under
+`~/.local/share/tgq/`; keep both local and out of cloud-synced folders.
+
+The optional non-secret settings file is discovered at
+`${XDG_CONFIG_HOME:-~/.config}/tgq/config.yaml`:
+
+```yaml
+paths:
+  db: ~/.local/share/tgq/messages.sqlite
+  watchlist: ~/.config/tgq/watchlist.yaml
+  session: ~/.local/share/tgq/tgq.session
+
+telegram:
+  port: 443
+```
+
+Paths in this file expand `~` and environment variables. Relative paths are
+resolved from the settings file directory. Override the file itself with
+`--settings PATH` or `TGQ_SETTINGS`. Value precedence is CLI option, existing
+`TGQ_*` environment variable, user settings, then the previous default.
+Existing path exports and repository-local `watchlist.yaml` / `tgq.session`
+work unchanged when no settings file exists.
 
 Resolve a peer named by the human before the first sync. This command reads only
 peer metadata, does not require `--db`, and does not add anything to the mirror:
 
 ```bash
-uv run tgq --config watchlist.yaml watchlist resolve @username
-uv run tgq --config watchlist.yaml watchlist resolve "Work chat" --write --dry-run
-uv run tgq --config watchlist.yaml watchlist resolve "Work chat" --write
+uv run tgq watchlist resolve @username
+uv run tgq watchlist resolve "Work chat" --write --dry-run
+uv run tgq watchlist resolve "Work chat" --write
 ```
 
 Queries may be an `@username`, `t.me` link, numeric peer id, or title substring.
@@ -71,11 +94,11 @@ and 443 as HTTP and intercept raw MTProto. Cursor Grok Bot computers currently
 allow the same Telegram transport on port 5222:
 
 ```bash
-export TGQ_TELEGRAM_PORT=5222
-uv run tgq --db "$TGQ_DB" sync
+TGQ_TELEGRAM_PORT=5222 uv run tgq sync
 ```
 
-The environment variable overrides `telegram.port` in `watchlist.yaml`.
+The environment variable overrides user settings and the legacy
+`telegram.port` field in existing `watchlist.yaml` files.
 HTTP(S) proxy variables do not carry raw MTProto; the port override is explicit
 and never triggers automatic port cycling.
 
@@ -83,18 +106,18 @@ and never triggers automatic port cycling.
 
 ```bash
 # Populate/update the mirror. All Telegram reads are limited to watchlist.yaml.
-uv run tgq --db "$TGQ_DB" sync
+uv run tgq sync
 
 # Search the local mirror
-uv run tgq --db "$TGQ_DB" --format jsonl search --tag urgent --since 24h
-uv run tgq --db "$TGQ_DB" search --peer work-chat --q "release OR deploy" --limit 20
+uv run tgq --format jsonl search --tag urgent --since 24h
+uv run tgq search --peer work-chat --q "release OR deploy" --limit 20
 
 # Propose a send — writes outbox only; does not transmit
-uv run tgq --db "$TGQ_DB" send --peer lena --body "..."
+uv run tgq send --peer lena --body "..."
 
 # Human approval; a separate sender process transmits only status=approved
-uv run tgq --db "$TGQ_DB" outbox approve 17
-uv run tgq --db "$TGQ_DB" outbox send
+uv run tgq outbox approve 17
+uv run tgq outbox send
 ```
 
 Other commands: `thread`, `tail`, `digest`, `peers`, `tag`, `retag`, `doctor`,
@@ -105,8 +128,8 @@ on stdout. Use `--verbose` before the command for transport, sync, and sender
 events, or `--quiet` to suppress project diagnostics:
 
 ```bash
-uv run tgq --db "$TGQ_DB" --verbose sync
-uv run tgq --db "$TGQ_DB" --quiet search --peer work-chat
+uv run tgq --verbose sync
+uv run tgq --quiet search --peer work-chat
 ```
 
 Writes support `--dry-run`. Secrets belong in the environment or `~/.config/tgq/secrets.env` (mode `0600`), never in the repo. Sync scope is `watchlist.yaml`; send requires `allow_send` in config **and** `peers.sendable`.

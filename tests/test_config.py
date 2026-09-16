@@ -27,6 +27,12 @@ def test_environment_overrides_yaml_port(tmp_path: Path) -> None:
     assert config.telegram.port == 5222
 
 
+def test_resolved_settings_port_overrides_legacy_watchlist(tmp_path: Path) -> None:
+    path = config_file(tmp_path, "telegram:\n  port: 80\npeers: []\n")
+    config = load_config(path, environ={}, telegram_port=5222)
+    assert config.telegram.port == 5222
+
+
 @pytest.mark.parametrize("value", ["not-a-port", "0", "65536"])
 def test_invalid_telegram_port_is_rejected(tmp_path: Path, value: str) -> None:
     with pytest.raises(ValueError, match="Telegram port"):

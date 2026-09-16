@@ -7,6 +7,8 @@
 - Add safe structured stderr diagnostics with `--verbose` and `--quiet`.
 - Add human-only `tgq watchlist resolve` to bootstrap peer IDs without writing
   unwatched peers or messages to the SQLite mirror.
+- Add optional XDG user settings for database, watchlist, session, and Telegram
+  port paths while preserving existing CLI and environment overrides.
 
 ## 0.1.0 — 2026-09-16
 

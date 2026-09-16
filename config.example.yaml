@@ -1,0 +1,7 @@
+paths:
+  db: ~/.local/share/tgq/messages.sqlite
+  watchlist: ~/.config/tgq/watchlist.yaml
+  session: ~/.local/share/tgq/tgq.session
+
+telegram:
+  port: 443

@@ -7,7 +7,7 @@ import os
 import sqlite3
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ from tgbridge.cli.errors import DatabaseError, TgqError
 from tgbridge.cli.formatting import render
 from tgbridge.cli.query import doctor, peers, search_messages, thread
 from tgbridge.config import (
+    Config,
     append_peer,
     format_peer_candidates_yaml,
     format_peer_yaml,
@@ -23,6 +24,7 @@ from tgbridge.config import (
 from tgbridge.db import connect, migrate
 from tgbridge.logging import configure_logging, event, get_logger
 from tgbridge.outbox import Outbox
+from tgbridge.settings import UserSettings, load_settings
 from tgbridge.sync.models import Message
 
 FORMAT_VERSION = 1
@@ -31,8 +33,9 @@ _LOG = get_logger("cli")
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tgq")
-    parser.add_argument("--db", default=os.environ.get("TGQ_DB"))
-    parser.add_argument("--config", default=os.environ.get("TGQ_CONFIG", "watchlist.yaml"))
+    parser.add_argument("--settings")
+    parser.add_argument("--db")
+    parser.add_argument("--config")
     parser.add_argument("--format", choices=("jsonl", "md", "table", "count"), default="jsonl")
     parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--format-version", type=int, default=FORMAT_VERSION)
@@ -62,7 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     _output_args(doctor_parser)
 
     sync = sub.add_parser("sync")
-    sync.add_argument("--session", default=os.environ.get("TGQ_SESSION", "tgq.session"))
+    sync.add_argument("--session")
     sync.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     sync.add_argument("--loop", action="store_true")
     sync.add_argument("--interval", type=int, default=60)
@@ -85,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
         decision.add_argument("--actor", default="human")
         decision.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     sender = outbox_sub.add_parser("send")
-    sender.add_argument("--session", default=os.environ.get("TGQ_SESSION", "tgq.session"))
+    sender.add_argument("--session")
     sender.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
 
     tag = sub.add_parser("tag")
@@ -102,7 +105,7 @@ def _parser() -> argparse.ArgumentParser:
     watchlist_sub = watchlist.add_subparsers(dest="watchlist_command", required=True)
     resolve = watchlist_sub.add_parser("resolve")
     resolve.add_argument("query")
-    resolve.add_argument("--session", default=os.environ.get("TGQ_SESSION", "tgq.session"))
+    resolve.add_argument("--session")
     resolve.add_argument("--write", action="store_true")
     resolve.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     return parser
@@ -139,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.format_version != FORMAT_VERSION:
         parser.error(f"unsupported format version: {args.format_version}")
     try:
+        _apply_user_settings(args)
         return _run(args)
     except TgqError as error:
         _log_cli_error(error, error.exit_code)
@@ -152,6 +156,50 @@ def main(argv: list[str] | None = None) -> int:
     except sqlite3.Error as error:
         _log_cli_error(error, 3)
         return 3
+
+
+def _apply_user_settings(
+    args: argparse.Namespace,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> UserSettings:
+    environment = os.environ if environ is None else environ
+    settings = load_settings(args.settings, environ=environment)
+    args.settings = str(settings.source)
+    args.db = _select(args.db, environment.get("TGQ_DB"), settings.db, None)
+    args.config = _select(
+        args.config,
+        environment.get("TGQ_CONFIG"),
+        settings.watchlist,
+        "watchlist.yaml",
+    )
+    if hasattr(args, "session"):
+        args.session = _select(
+            args.session,
+            environment.get("TGQ_SESSION"),
+            settings.session,
+            "tgq.session",
+        )
+    args.telegram_port = environment.get(
+        "TGQ_TELEGRAM_PORT", settings.telegram_port
+    )
+    return settings
+
+
+def _select(
+    cli_value: Any,
+    environment_value: Any,
+    settings_value: Any,
+    default: Any,
+) -> Any:
+    for value in (cli_value, environment_value, settings_value):
+        if value is not None:
+            return str(value) if isinstance(value, Path) else value
+    return default
+
+
+def _load_watchlist(args: argparse.Namespace) -> Config:
+    return load_config(args.config, telegram_port=args.telegram_port)
 
 
 def _log_cli_error(error: Exception, exit_code: int) -> None:
@@ -225,7 +273,7 @@ def _dispatch(
     if args.command == "doctor":
         return doctor(connection)
     if args.command == "sync":
-        config = load_config(args.config)
+        config = _load_watchlist(args)
         from tgbridge.sync.runtime import run_sync, run_sync_loop
 
         if args.loop:
@@ -245,7 +293,7 @@ def _dispatch(
         )
         return [{"fetched": count, "dry_run": args.dry_run}]
     if args.command == "send":
-        outbox = Outbox(connection, load_config(args.config))
+        outbox = Outbox(connection, _load_watchlist(args))
         item_id = outbox.enqueue(
             args.peer,
             args.body,
@@ -266,7 +314,7 @@ def _dispatch(
 def _run_watchlist(args: argparse.Namespace) -> int:
     if args.watchlist_command != "resolve":
         raise ValueError(f"unknown watchlist command: {args.watchlist_command}")
-    config = load_config(args.config)
+    config = _load_watchlist(args)
     from tgbridge.sync.runtime import run_resolve
 
     matches = asyncio.run(run_resolve(config, args.query, session=args.session))
@@ -289,7 +337,7 @@ def _run_watchlist(args: argparse.Namespace) -> int:
 def _outbox_command(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> list[dict[str, Any]]:
-    config = load_config(args.config)
+    config = _load_watchlist(args)
     outbox = Outbox(connection, config)
     if args.outbox_command == "list":
         return outbox.list(args.status)
@@ -348,7 +396,7 @@ def _tag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[
 
 
 def _retag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
-    config = load_config(args.config)
+    config = _load_watchlist(args)
     if args.dry_run:
         return [{"rules": len(config.rules), "dry_run": True}]
     from tgbridge.sync.engine import SyncEngine

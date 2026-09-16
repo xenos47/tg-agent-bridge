@@ -106,14 +106,21 @@ def _port(value: Any) -> int:
 
 
 def load_config(
-    path: str | Path, *, environ: Mapping[str, str] | None = None
+    path: str | Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+    telegram_port: int | str | None = None,
 ) -> Config:
     """Load a privacy-bounded watchlist and policy configuration."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     environment = os.environ if environ is None else environ
     telegram = raw.get("telegram", {})
     configured_port = telegram.get("port", 443)
-    selected_port = environment.get("TGQ_TELEGRAM_PORT", configured_port)
+    selected_port = (
+        telegram_port
+        if telegram_port is not None
+        else environment.get("TGQ_TELEGRAM_PORT", configured_port)
+    )
     peers = tuple(
         Peer(
             peer_id=int(item["id"]),
