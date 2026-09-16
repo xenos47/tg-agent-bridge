@@ -1,8 +1,9 @@
 """Shared Telethon client and secure session construction."""
-# pyright: reportArgumentType=false, reportMissingTypeStubs=false
+# pyright: reportArgumentType=false, reportGeneralTypeIssues=false, reportMissingTypeStubs=false
 
 import os
 import threading
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,7 +11,10 @@ from pathlib import Path
 from telethon import TelegramClient
 from telethon.sessions import SQLiteSession
 
+from tgbridge.logging import classify_connection_error, event, get_logger
+
 _UMASK_LOCK = threading.Lock()
+_LOG = get_logger("sync.client")
 
 
 @contextmanager
@@ -58,10 +62,59 @@ def create_client(
     api_hash: str,
     *,
     port: int = 443,
+    role: str = "sync",
 ) -> TelegramClient:
     """Create a client whose session is private before any network operation."""
     session = ForcedPortSQLiteSession(session_id, port)
     client = TelegramClient(session, api_id, api_hash)
     session.set_dc(session.dc_id, session.server_address, port)
     _protect(Path(session.filename))
+    event(
+        _LOG,
+        20,
+        "telegram_client_configured",
+        role=role,
+        transport="tcp_full",
+        dc=session.dc_id,
+        address=session.server_address,
+        port=session.port,
+    )
     return client
+
+
+async def start_client(client: TelegramClient, *, role: str) -> None:
+    started = time.perf_counter()
+    event(_LOG, 20, "telegram_client_starting", role=role)
+    try:
+        await client.start()
+    except Exception as error:
+        error_type, hint = classify_connection_error(error)
+        event(
+            _LOG,
+            40,
+            "telegram_client_failed",
+            role=role,
+            error_type=error_type,
+            hint=hint,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+        raise RuntimeError(hint) from error
+    event(
+        _LOG,
+        20,
+        "telegram_client_started",
+        role=role,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
+async def disconnect_client(client: TelegramClient, *, role: str) -> None:
+    started = time.perf_counter()
+    await client.disconnect()
+    event(
+        _LOG,
+        20,
+        "telegram_client_disconnected",
+        role=role,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )

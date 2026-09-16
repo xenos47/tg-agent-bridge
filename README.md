@@ -86,6 +86,15 @@ uv run tgq --db "$TGQ_DB" outbox send
 Other commands: `thread`, `tail`, `digest`, `peers`, `tag`, `retag`, `doctor`,
 and `outbox list|reject`.
 
+Diagnostics are structured JSON lines on stderr and never change command data
+on stdout. Use `--verbose` before the command for transport, sync, and sender
+events, or `--quiet` to suppress project diagnostics:
+
+```bash
+uv run tgq --db "$TGQ_DB" --verbose sync
+uv run tgq --db "$TGQ_DB" --quiet search --peer work-chat
+```
+
 Writes support `--dry-run`. Secrets belong in the environment or `~/.config/tgq/secrets.env` (mode `0600`), never in the repo. Sync scope is `watchlist.yaml`; send requires `allow_send` in config **and** `peers.sendable`.
 
 ## Data model (summary)

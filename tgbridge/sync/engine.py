@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from tgbridge.db import transaction
+from tgbridge.logging import event, get_logger
 from tgbridge.sync.models import Message, Peer, TagRule
+
+_LOG = get_logger("sync.engine")
 
 
 class HistoryClient(Protocol):
@@ -124,6 +127,14 @@ class SyncEngine:
                 """,
                 (cursor, int(len(messages) < self.batch_size), self.now(), peer.peer_id),
             )
+        event(
+            _LOG,
+            20,
+            "backfill_cursor_advanced",
+            peer=peer.slug,
+            cursor=cursor,
+            batch_size=len(messages),
+        )
         return self._result(peer.peer_id, "backfill", messages, len(messages))
 
     async def rescan(
@@ -165,6 +176,14 @@ class SyncEngine:
                 """,
                 (until, f"FloodWait: {seconds}s", peer_id),
             )
+        event(
+            _LOG,
+            30,
+            "sync_cooldown_set",
+            peer=str(peer_id),
+            seconds=seconds,
+            cooldown_until=until,
+        )
         return until
 
     def record_error(self, peer_id: int, error: Exception) -> int | None:
@@ -183,6 +202,15 @@ class SyncEngine:
                 """,
                 (str(error), count, cooldown, peer_id),
             )
+        event(
+            _LOG,
+            30,
+            "sync_error_recorded",
+            peer=str(peer_id),
+            error_type=type(error).__name__,
+            error_count=count,
+            cooldown_until=cooldown,
+        )
         return cooldown
 
     async def _collect(
@@ -223,6 +251,14 @@ class SyncEngine:
                 """,
                 (max(message.msg_id for message in messages), self.now(), peer_id),
             )
+        event(
+            _LOG,
+            20,
+            "sync_cursor_advanced",
+            peer=str(peer_id),
+            cursor=max(message.msg_id for message in messages),
+            batch_size=len(messages),
+        )
         return self._result(peer_id, mode, messages, len(messages))
 
     def upsert_many(self, messages: Sequence[Message]) -> None:

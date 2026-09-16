@@ -16,10 +16,12 @@ from tgbridge.cli.formatting import render
 from tgbridge.cli.query import doctor, peers, search_messages, thread
 from tgbridge.config import load_config
 from tgbridge.db import connect, migrate
+from tgbridge.logging import configure_logging, event, get_logger
 from tgbridge.outbox import Outbox
 from tgbridge.sync.models import Message
 
 FORMAT_VERSION = 1
+_LOG = get_logger("cli")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -30,6 +32,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--format-version", type=int, default=FORMAT_VERSION)
     parser.add_argument("--dry-run", action="store_true")
+    diagnostics = parser.add_mutually_exclusive_group()
+    diagnostics.add_argument("--verbose", action="store_true")
+    diagnostics.add_argument("--quiet", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
     search = sub.add_parser("search")
@@ -117,22 +122,34 @@ def _search_args(parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    configure_logging(verbose=args.verbose, quiet=args.quiet)
     if args.format_version != FORMAT_VERSION:
         parser.error(f"unsupported format version: {args.format_version}")
     try:
         return _run(args)
     except TgqError as error:
-        print(str(error), file=sys.stderr)
+        _log_cli_error(error, error.exit_code)
         return error.exit_code
     except (ValueError, OSError) as error:
-        print(str(error), file=sys.stderr)
+        _log_cli_error(error, 2)
         return 2
     except RuntimeError as error:
-        print(str(error), file=sys.stderr)
+        _log_cli_error(error, 4)
         return 4
     except sqlite3.Error as error:
-        print(str(error), file=sys.stderr)
+        _log_cli_error(error, 3)
         return 3
+
+
+def _log_cli_error(error: Exception, exit_code: int) -> None:
+    event(
+        _LOG,
+        40,
+        "cli_error",
+        error_type=type(error).__name__,
+        error=str(error),
+        exit_code=exit_code,
+    )
 
 
 def _run(args: argparse.Namespace) -> int:

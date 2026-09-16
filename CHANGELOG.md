@@ -4,6 +4,7 @@
 
 - Allow an explicit MTProto port for restricted hosted environments.
 - Protect Telethon session files before the first network operation.
+- Add safe structured stderr diagnostics with `--verbose` and `--quiet`.
 
 ## 0.1.0 — 2026-09-16
 
