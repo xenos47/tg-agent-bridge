@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 — Unreleased
+
+- Allow an explicit MTProto port for restricted hosted environments.
+- Protect Telethon session files before the first network operation.
+
 ## 0.1.0 — 2026-09-16
 
 - Add the SQLite mirror and numbered migrations.

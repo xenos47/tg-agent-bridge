@@ -6,12 +6,12 @@ import random
 import sqlite3
 from pathlib import Path
 
-from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 
 from tgbridge.config import Config
 from tgbridge.outbox import Outbox
 from tgbridge.secrets import credential, load_secrets
+from tgbridge.sync.client import create_client
 from tgbridge.sync.engine import SyncEngine
 from tgbridge.sync.sender import send_approved
 from tgbridge.sync.telethon_adapter import TelethonHistoryClient
@@ -26,12 +26,6 @@ def _credentials() -> tuple[int, str]:
     return int(api_id), api_hash
 
 
-def _protect_session(session: str | Path) -> None:
-    path = Path(session)
-    if path.exists():
-        path.chmod(0o600)
-
-
 async def run_sync(
     connection: sqlite3.Connection,
     config: Config,
@@ -40,9 +34,8 @@ async def run_sync(
     dry_run: bool = False,
 ) -> int:
     api_id, api_hash = _credentials()
-    client = TelegramClient(str(session), api_id, api_hash)
+    client = create_client(session, api_id, api_hash, port=config.telegram.port)
     await client.start()
-    _protect_session(session)
     engine = SyncEngine(connection, TelethonHistoryClient(client), rules=config.rules)
     fetched = 0
     try:
@@ -83,9 +76,13 @@ async def run_sender(
     dry_run: bool = False,
 ) -> int:
     api_id, api_hash = _credentials()
-    client = TelegramClient(str(session), api_id, api_hash)
+    client = create_client(
+        session,
+        api_id,
+        api_hash,
+        port=outbox.config.telegram.port,
+    )
     await client.start()
-    _protect_session(session)
     try:
         return await send_approved(outbox, client, dry_run=dry_run)
     finally:
