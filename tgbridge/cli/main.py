@@ -14,7 +14,12 @@ from typing import Any
 from tgbridge.cli.errors import DatabaseError, TgqError
 from tgbridge.cli.formatting import render
 from tgbridge.cli.query import doctor, peers, search_messages, thread
-from tgbridge.config import load_config
+from tgbridge.config import (
+    append_peer,
+    format_peer_candidates_yaml,
+    format_peer_yaml,
+    load_config,
+)
 from tgbridge.db import connect, migrate
 from tgbridge.logging import configure_logging, event, get_logger
 from tgbridge.outbox import Outbox
@@ -92,6 +97,14 @@ def _parser() -> argparse.ArgumentParser:
     tag.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     retag = sub.add_parser("retag")
     retag.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
+
+    watchlist = sub.add_parser("watchlist")
+    watchlist_sub = watchlist.add_subparsers(dest="watchlist_command", required=True)
+    resolve = watchlist_sub.add_parser("resolve")
+    resolve.add_argument("query")
+    resolve.add_argument("--session", default=os.environ.get("TGQ_SESSION", "tgq.session"))
+    resolve.add_argument("--write", action="store_true")
+    resolve.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     return parser
 
 
@@ -153,6 +166,8 @@ def _log_cli_error(error: Exception, exit_code: int) -> None:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "watchlist":
+        return _run_watchlist(args)
     if not args.db:
         raise DatabaseError("--db or TGQ_DB is required")
     path = Path(args.db)
@@ -246,6 +261,29 @@ def _dispatch(
     if args.command == "retag":
         return _retag(connection, args)
     raise ValueError(f"unknown command: {args.command}")
+
+
+def _run_watchlist(args: argparse.Namespace) -> int:
+    if args.watchlist_command != "resolve":
+        raise ValueError(f"unknown watchlist command: {args.watchlist_command}")
+    config = load_config(args.config)
+    from tgbridge.sync.runtime import run_resolve
+
+    matches = asyncio.run(run_resolve(config, args.query, session=args.session))
+    if not matches:
+        return 1
+    if len(matches) > 1:
+        sys.stdout.write(format_peer_candidates_yaml(matches))
+        return 1
+
+    peer = matches[0]
+    output = (
+        append_peer(args.config, peer, dry_run=args.dry_run)
+        if args.write
+        else format_peer_yaml(peer)
+    )
+    sys.stdout.write(output)
+    return 0
 
 
 def _outbox_command(

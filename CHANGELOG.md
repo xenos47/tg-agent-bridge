@@ -5,6 +5,8 @@
 - Allow an explicit MTProto port for restricted hosted environments.
 - Protect Telethon session files before the first network operation.
 - Add safe structured stderr diagnostics with `--verbose` and `--quiet`.
+- Add human-only `tgq watchlist resolve` to bootstrap peer IDs without writing
+  unwatched peers or messages to the SQLite mirror.
 
 ## 0.1.0 — 2026-09-16
 

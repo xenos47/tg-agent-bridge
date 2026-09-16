@@ -15,8 +15,10 @@ from tgbridge.outbox import Outbox
 from tgbridge.secrets import credential, load_secrets
 from tgbridge.sync.client import create_client, disconnect_client, start_client
 from tgbridge.sync.engine import SyncEngine
+from tgbridge.sync.models import Peer
+from tgbridge.sync.resolve import parse_query, resolve
 from tgbridge.sync.sender import send_approved
-from tgbridge.sync.telethon_adapter import TelethonHistoryClient
+from tgbridge.sync.telethon_adapter import TelethonHistoryClient, TelethonResolveClient
 
 _LOG = get_logger("sync.runtime")
 
@@ -92,6 +94,36 @@ async def run_sync(
     finally:
         await disconnect_client(client, role="sync")
     return fetched
+
+
+async def run_resolve(
+    config: Config,
+    query: str,
+    *,
+    session: str | Path,
+) -> list[Peer]:
+    """Resolve peer metadata without touching the SQLite mirror."""
+    parse_query(query)
+    api_id, api_hash = _credentials()
+    client = create_client(
+        session,
+        api_id,
+        api_hash,
+        port=config.telegram.port,
+        role="resolve",
+    )
+    await start_client(client, role="resolve")
+    try:
+        try:
+            return await resolve(
+                TelethonResolveClient(client),
+                query,
+                existing_peers=config.peers,
+            )
+        except Exception as error:
+            raise RuntimeError(f"Telegram resolve failed: {error}") from error
+    finally:
+        await disconnect_client(client, role="resolve")
 
 
 async def run_sync_loop(

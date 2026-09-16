@@ -32,6 +32,65 @@ class Config:
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
 
 
+def _peer_mapping(peer: Peer) -> dict[str, Any]:
+    return {
+        "slug": peer.slug,
+        "id": peer.peer_id,
+        "kind": peer.kind,
+        "title": peer.title,
+        "username": peer.username,
+        "sendable": peer.sendable,
+    }
+
+
+def format_peer_yaml(peer: Peer) -> str:
+    """Render one peer as a watchlist-compatible YAML list item."""
+    return yaml.safe_dump(
+        [_peer_mapping(peer)],
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+
+def format_peer_candidates_yaml(peers: tuple[Peer, ...] | list[Peer]) -> str:
+    """Render ambiguous metadata-only candidates without watchlist policy fields."""
+    candidates = [
+        {
+            "id": peer.peer_id,
+            "kind": peer.kind,
+            "title": peer.title,
+            "username": peer.username,
+        }
+        for peer in peers
+    ]
+    return yaml.safe_dump(candidates, allow_unicode=True, sort_keys=False)
+
+
+def append_peer(path: str | Path, peer: Peer, *, dry_run: bool = False) -> str:
+    """Validate and append a resolved peer to a watchlist."""
+    target = Path(path)
+    raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("watchlist must be a YAML mapping")
+    peer_items = raw.setdefault("peers", [])
+    if not isinstance(peer_items, list):
+        raise ValueError("watchlist peers must be a YAML list")
+    if any(int(item["id"]) == peer.peer_id for item in peer_items):
+        raise ValueError(f"peer id already exists in watchlist: {peer.peer_id}")
+    if any(str(item["slug"]) == peer.slug for item in peer_items):
+        raise ValueError(f"peer slug already exists in watchlist: {peer.slug}")
+
+    fragment = format_peer_yaml(peer)
+    if dry_run:
+        return fragment
+    peer_items.append(_peer_mapping(peer))
+    target.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return fragment
+
+
 def _positive(value: Any, default: int) -> int:
     return int(value) if isinstance(value, int) and value > 0 else default
 

@@ -52,6 +52,20 @@ export TGQ_API_HASH="..."
 Credentials may instead be stored in `~/.config/tgq/secrets.env`, which must
 have mode `0600`. The Telethon session defaults to `tgq.session`; keep it local.
 
+Resolve a peer named by the human before the first sync. This command reads only
+peer metadata, does not require `--db`, and does not add anything to the mirror:
+
+```bash
+uv run tgq --config watchlist.yaml watchlist resolve @username
+uv run tgq --config watchlist.yaml watchlist resolve "Work chat" --write --dry-run
+uv run tgq --config watchlist.yaml watchlist resolve "Work chat" --write
+```
+
+Queries may be an `@username`, `t.me` link, numeric peer id, or title substring.
+An ambiguous title prints candidates and leaves the config unchanged. `--write`
+is a human-only bootstrap action that appends the resolved peer with sending
+disabled; the peer enters SQLite only after a later `sync`.
+
 The default MTProto port is `443`. Some hosted environments classify ports 80
 and 443 as HTTP and intercept raw MTProto. Cursor Grok Bot computers currently
 allow the same Telegram transport on port 5222:

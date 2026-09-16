@@ -8,6 +8,7 @@ from tgbridge.cli.formatting import render
 from tgbridge.cli.main import main
 from tgbridge.cli.query import search_messages
 from tgbridge.db import connect, migrate
+from tgbridge.sync.models import Peer
 
 
 def test_jsonl_matches_golden(db: sqlite3.Connection) -> None:
@@ -116,3 +117,113 @@ def test_sync_dry_run_does_not_create_database(
 def test_cli_package_does_not_import_telethon() -> None:
     cli_root = Path(__file__).parents[1] / "tgbridge" / "cli"
     assert "telethon" not in "".join(path.read_text() for path in cli_root.glob("*.py")).lower()
+
+
+def test_watchlist_resolve_needs_no_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "watchlist.yaml"
+    config.write_text("peers: []\n")
+
+    async def fake_resolve(*_: object, **__: object) -> list[Peer]:
+        return [Peer(-100123, "work-chat", "group", "Work Chat")]
+
+    monkeypatch.setattr("tgbridge.sync.runtime.run_resolve", fake_resolve)
+    assert main(["--config", str(config), "watchlist", "resolve", "Work Chat"]) == 0
+    assert capsys.readouterr().out.startswith("- slug: work-chat\n")
+    assert not (tmp_path / "messages.sqlite").exists()
+
+
+def test_watchlist_resolve_ambiguous_does_not_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "watchlist.yaml"
+    config.write_text("peers: []\n")
+    original = config.read_text()
+
+    async def fake_resolve(*_: object, **__: object) -> list[Peer]:
+        return [
+            Peer(-1001, "work-chat", "group", "Work Chat"),
+            Peer(-1002, "work-news", "channel", "Work News"),
+        ]
+
+    monkeypatch.setattr("tgbridge.sync.runtime.run_resolve", fake_resolve)
+    result = main(
+        [
+            "--config",
+            str(config),
+            "watchlist",
+            "resolve",
+            "Work",
+            "--write",
+        ]
+    )
+    assert result == 1
+    assert "id: -1001" in capsys.readouterr().out
+    assert config.read_text() == original
+
+
+def test_watchlist_resolve_write_dry_run_prints_fragment_without_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "watchlist.yaml"
+    config.write_text("peers: []\n")
+    original = config.read_text()
+
+    async def fake_resolve(*_: object, **__: object) -> list[Peer]:
+        return [Peer(-100123, "work-chat", "group", "Work Chat")]
+
+    monkeypatch.setattr("tgbridge.sync.runtime.run_resolve", fake_resolve)
+    result = main(
+        [
+            "--config",
+            str(config),
+            "watchlist",
+            "resolve",
+            "Work Chat",
+            "--write",
+            "--dry-run",
+        ]
+    )
+    assert result == 0
+    assert capsys.readouterr().out.startswith("- slug: work-chat\n")
+    assert config.read_text() == original
+
+
+def test_watchlist_resolve_duplicate_exits_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "watchlist.yaml"
+    config.write_text(
+        "peers:\n"
+        "  - slug: existing\n"
+        "    id: -100123\n"
+        "    kind: group\n"
+        "    title: Existing\n"
+    )
+    original = config.read_text()
+
+    async def fake_resolve(*_: object, **__: object) -> list[Peer]:
+        return [Peer(-100123, "resolved", "group", "Resolved")]
+
+    monkeypatch.setattr("tgbridge.sync.runtime.run_resolve", fake_resolve)
+    argv = [
+        "--config",
+        str(config),
+        "watchlist",
+        "resolve",
+        "-100123",
+        "--write",
+        "--dry-run",
+    ]
+    assert main(argv) == 2
+    assert config.read_text() == original
+    assert "already exists" in capsys.readouterr().err
