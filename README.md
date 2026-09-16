@@ -68,6 +68,7 @@ Writes support `--dry-run`. Secrets belong in the environment or `~/.config/tgq/
 | Time is UTC unix int | Keeps `--since` comparisons and indexes honest |
 | `sync_state` moves in the same transaction as the batch | Avoid holes or infinite replays after a crash |
 | Only path out is `outbox` with `status=approved` | No direct Telethon send |
+| Peer `slug` is immutable after insert | `slug#msg_id` citations must not break |
 
 The database is **unencrypted** and holds private chat history. Do not put it in cloud-synced folders; treat the file like sensitive mail.
 
@@ -76,7 +77,7 @@ The database is **unencrypted** and holds private chat history. Do not put it in
 This is a userbot acting as a real person. Defaults and hard boundaries:
 
 - Sync **only** peers listed in `watchlist.yaml`. Absence from the DB is the privacy boundary — not a read-time filter.
-- Account is **read-only** until send is enabled in config and each message is approved. `approve` is human-only.
+- Account is **read-only** until send is enabled in config and each message is approved. `approve` and `reject` are human-only by contract and agent instructions, not an OS sandbox: a same-UID process can still invoke those commands. The technical boundary is process split — enqueue cannot transmit, and the sender reads only `status=approved`.
 - Telethon session file: mode `0600`, gitignored, never logged. Log formatters redact secrets centrally.
 - Every write action is recorded in `audit`.
 
@@ -109,3 +110,8 @@ Closed decisions — do not “improve” them without an explicit product chang
 - **No real-time update stream.** Timer sync trades minutes of lag for a simple, restartable daemon.
 - **No LLM on the hot path.** Auto-tagging is rule-based at write time. Optional selective LLM tagging is an explicit command, not the message pipeline.
 - **No second store.** SQLite until measured pain says otherwise.
+- **No OS-level human-presence for approve.** Touch ID / polkit are out of v0.1. Approval is a confused-deputy control (process split + human workflow), not a sandbox.
+
+## License
+
+MIT. Copyright (c) 2026 Igor Kropochev. Contributions are inbound=outbound under the same license; there is no CLA.
