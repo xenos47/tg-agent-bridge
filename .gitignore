@@ -1,0 +1,34 @@
+# Local agent workflows and instructions
+.cursor/
+.claude/
+AGENTS.md
+CLAUDE.md
+
+# Credentials and local Telegram state
+.env
+.env.*
+!.env.example
+secrets.env
+watchlist.yaml
+*.session
+*.session-journal
+
+# Local databases, logs, and private exports
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+data/
+tests/fixtures/private/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+*.egg-info/
