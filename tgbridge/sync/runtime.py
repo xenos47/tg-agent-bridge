@@ -54,6 +54,8 @@ async def run_sync(
                 await engine.backfill(peer, dry_run=dry_run)
             except FloodWaitError as error:
                 engine.record_flood_wait(peer.peer_id, int(error.seconds))
+            except Exception as error:
+                engine.record_error(peer.peer_id, error)
             await asyncio.sleep(random.uniform(0.5, 2.0))
     finally:
         await client.disconnect()

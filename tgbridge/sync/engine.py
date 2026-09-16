@@ -167,6 +167,24 @@ class SyncEngine:
             )
         return until
 
+    def record_error(self, peer_id: int, error: Exception) -> int | None:
+        """Persist failures and cool down a peer after five consecutive errors."""
+        row = self._state(peer_id)
+        if row is None:
+            raise ValueError(f"peer {peer_id} is not registered")
+        count = int(row["error_count"]) + 1
+        cooldown = self.now() + 900 if count >= 5 else None
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE sync_state
+                SET last_error=?, error_count=?, cooldown_until=?
+                WHERE peer_id=?
+                """,
+                (str(error), count, cooldown, peer_id),
+            )
+        return cooldown
+
     async def _collect(
         self,
         peer_id: int,

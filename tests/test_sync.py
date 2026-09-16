@@ -103,3 +103,48 @@ async def test_rules_and_flood_wait_are_persisted(db: sqlite3.Connection) -> Non
     until = engine.record_flood_wait(1, 60)
     assert until >= 1700001065
     assert db.execute("SELECT cooldown_until FROM sync_state").fetchone()[0] == until
+
+
+@pytest.mark.asyncio
+async def test_batch_and_cursor_roll_back_together(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    engine = SyncEngine(db, FakeClient([msg(1), msg(2)]), now=lambda: 1700001000)
+    engine.register_peer(peer)
+    db.execute(
+        """
+        CREATE TRIGGER fail_second BEFORE INSERT ON messages
+        WHEN new.msg_id=2 BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        await engine.incremental(peer)
+    assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+    assert db.execute("SELECT last_msg_id FROM sync_state").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_cursor_is_independent_from_fresh_cursor(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    fresh = SyncEngine(db, FakeClient([msg(3)]), now=lambda: 1700001000)
+    fresh.register_peer(peer)
+    await fresh.incremental(peer)
+    history = SyncEngine(db, FakeClient([msg(1), msg(2), msg(3)]), now=lambda: 1700001061)
+    await history.backfill(peer)
+    state = db.execute(
+        "SELECT last_msg_id,backfill_cursor,backfill_done FROM sync_state"
+    ).fetchone()
+    assert tuple(state) == (3, 1, 1)
+    assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 3
+
+
+def test_repeated_errors_persist_cooldown(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    engine = SyncEngine(db, FakeClient([]), now=lambda: 1700001000)
+    engine.register_peer(peer)
+    for _ in range(4):
+        assert engine.record_error(1, RuntimeError("broken")) is None
+    assert engine.record_error(1, RuntimeError("broken")) == 1700001900
+    row = db.execute(
+        "SELECT error_count,cooldown_until,last_error FROM sync_state"
+    ).fetchone()
+    assert tuple(row) == (5, 1700001900, "broken")
