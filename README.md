@@ -52,6 +52,19 @@ export TGQ_API_HASH="..."
 Credentials may instead be stored in `~/.config/tgq/secrets.env`, which must
 have mode `0600`. The Telethon session defaults to `tgq.session`; keep it local.
 
+The default MTProto port is `443`. Some hosted environments classify ports 80
+and 443 as HTTP and intercept raw MTProto. Cursor Grok Bot computers currently
+allow the same Telegram transport on port 5222:
+
+```bash
+export TGQ_TELEGRAM_PORT=5222
+uv run tgq --db "$TGQ_DB" sync
+```
+
+The environment variable overrides `telegram.port` in `watchlist.yaml`.
+HTTP(S) proxy variables do not carry raw MTProto; the port override is explicit
+and never triggers automatic port cycling.
+
 ## CLI
 
 ```bash
