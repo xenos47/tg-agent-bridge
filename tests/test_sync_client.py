@@ -1,3 +1,4 @@
+import asyncio
 import stat
 from pathlib import Path
 from typing import Any
@@ -7,8 +8,9 @@ from telethon.crypto import AuthKey
 from telethon.sessions import SQLiteSession
 
 from tgbridge.config import Config, TelegramSettings
+from tgbridge.logging import configure_logging
 from tgbridge.outbox import Outbox
-from tgbridge.sync.client import ForcedPortSQLiteSession, create_client
+from tgbridge.sync.client import ForcedPortSQLiteSession, create_client, start_client
 from tgbridge.sync.runtime import run_sender, run_sync
 
 
@@ -109,3 +111,25 @@ async def test_sync_and_sender_share_configured_client_factory(
     await run_sync(db, config, session="unused.session")
     await run_sender(Outbox(db, config), session="unused.session")
     assert ports == [5222, 5222]
+
+
+@pytest.mark.asyncio
+async def test_start_failure_logs_safe_http_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_partial = b" 400 Bad Request\r\nServer: Pingora\r\nPRIVATE-BUFFER"
+    read_error = asyncio.IncompleteReadError(
+        secret_partial,
+        int.from_bytes(b"HTTP", "little") - 8,
+    )
+
+    class FailingClient:
+        async def start(self) -> None:
+            raise read_error
+
+    configure_logging()
+    with pytest.raises(RuntimeError, match="5222"):
+        await start_client(FailingClient(), role="sync")  # type: ignore[arg-type]
+    output = capsys.readouterr().err
+    assert '"error_type":"http_interception"' in output
+    assert "PRIVATE-BUFFER" not in output

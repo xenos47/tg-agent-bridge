@@ -67,6 +67,27 @@ def test_output_flags_work_after_subcommand(
     assert capsys.readouterr().out == "1\n"
 
 
+def test_diagnostic_modes_do_not_change_stdout_or_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "diagnostics.sqlite"
+    connection = connect(database)
+    migrate(connection)
+    peer(connection)
+    message(connection)
+    connection.close()
+    outputs: list[str] = []
+    for flag in (None, "--verbose", "--quiet"):
+        argv = ["--db", str(database)]
+        if flag:
+            argv.append(flag)
+        argv.append("search")
+        assert main(argv) == 0
+        captured = capsys.readouterr()
+        outputs.append(captured.out)
+    assert outputs[0] == outputs[1] == outputs[2]
+
+
 def test_sync_dry_run_does_not_create_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
