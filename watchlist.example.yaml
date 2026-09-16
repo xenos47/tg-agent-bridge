@@ -1,0 +1,25 @@
+allow_send: false
+
+rate_limits:
+  global_per_hour: 20
+  peer_per_hour: 5
+  minimum_gap_seconds: 30
+
+peers:
+  - slug: work-chat
+    id: -1001234567890
+    kind: group
+    title: Work chat
+    sendable: false
+    priority: 10
+  - slug: lena
+    id: 987654321
+    kind: user
+    title: Lena
+    sendable: true
+
+rules:
+  - id: urgent-ru
+    match:
+      text_regex: "(?i)\\b(срочно|asap|горит)\\b"
+    tag: urgent

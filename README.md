@@ -4,7 +4,9 @@ Local bridge between a Telegram user account and AI agents. The agent never talk
 
 ## Status
 
-This repository is a **product spec**, not a working tool yet. The Python package, sync daemon, and CLI are not in the tree. What follows is the intended design; treat command examples as the target interface, not something you can run today.
+v0.1 is implemented for Python 3.12 and 3.13 on macOS and Linux. It includes
+the SQLite mirror, offline-tested incremental sync, deterministic read CLI,
+and moderated outbox.
 
 Local agent instructions and workflows are intentionally excluded from version control.
 
@@ -37,23 +39,39 @@ flowchart TD
 - **`tgbridge/db/`** — schema and migrations; the contract between layers.
 - **`tgbridge/cli/`** — `tgq`. Reads the mirror, never MTProto. Fast startup, tests against fixture DBs with no network.
 
-## Target interface
-
-Planned CLI surface (not implemented):
+## Install and configure
 
 ```bash
-# Search the local mirror
-tgq search --tag urgent --since 24h --format jsonl
-tgq search --peer work-chat --q "release OR deploy" --limit 20
-
-# Propose a send — writes outbox only; does not transmit
-tgq send --peer lena --body "..."
-
-# Human approval; a separate sender process transmits only status=approved
-tgq outbox approve 17
+uv sync --dev
+cp watchlist.example.yaml watchlist.yaml
+export TGQ_DB="$HOME/.local/share/tgq/messages.sqlite"
+export TGQ_API_ID="..."
+export TGQ_API_HASH="..."
 ```
 
-Other planned commands: `thread`, `tail`, `digest`, `peers`, `tag`, `retag`, `sync`, `doctor`, `outbox list|reject|send`.
+Credentials may instead be stored in `~/.config/tgq/secrets.env`, which must
+have mode `0600`. The Telethon session defaults to `tgq.session`; keep it local.
+
+## CLI
+
+```bash
+# Populate/update the mirror. All Telegram reads are limited to watchlist.yaml.
+uv run tgq --db "$TGQ_DB" sync
+
+# Search the local mirror
+uv run tgq --db "$TGQ_DB" --format jsonl search --tag urgent --since 24h
+uv run tgq --db "$TGQ_DB" search --peer work-chat --q "release OR deploy" --limit 20
+
+# Propose a send — writes outbox only; does not transmit
+uv run tgq --db "$TGQ_DB" send --peer lena --body "..."
+
+# Human approval; a separate sender process transmits only status=approved
+uv run tgq --db "$TGQ_DB" outbox approve 17
+uv run tgq --db "$TGQ_DB" outbox send
+```
+
+Other commands: `thread`, `tail`, `digest`, `peers`, `tag`, `retag`, `doctor`,
+and `outbox list|reject`.
 
 Writes support `--dry-run`. Secrets belong in the environment or `~/.config/tgq/secrets.env` (mode `0600`), never in the repo. Sync scope is `watchlist.yaml`; send requires `allow_send` in config **and** `peers.sendable`.
 
@@ -93,14 +111,21 @@ Telegram limits accounts by behavior. Convenience is not worth a locked human ac
 
 ## Development notes
 
-When implementation starts:
-
 - Tests never hit the network. Sync uses a mocked client and fixture messages; CLI uses a temporary DB filled by factories.
 - Sync bugs: put the problematic `raw_json` in a fixture and write a failing test before changing the daemon. Live-API debug loops invite FloodWait.
 - CLI stdout is a public API consumed by agents. Adding fields is fine; renaming or removing requires a `--format-version` bump and a CHANGELOG entry.
 - Any write path (`sync`, `send`, bulk tag) must support `--dry-run`.
 - No ORM. Open connections with `journal_mode=WAL` and `busy_timeout=5000` so the daemon can write while agents read.
 - FTS5 is external-content over `messages.text`, kept in sync with triggers.
+
+Run all checks:
+
+```bash
+uv sync --dev
+uv run pytest
+uv run ruff check .
+uv run basedpyright
+```
 
 ## Intentionally not in v1
 
