@@ -1,0 +1,16 @@
+[
+  {
+    "id": 41,
+    "date": 1700000000,
+    "sender_id": 10,
+    "message": "срочно: тестовый релиз",
+    "reply_to_msg_id": null
+  },
+  {
+    "id": 42,
+    "date": 1700000060,
+    "sender_id": 11,
+    "message": "синтетический ответ",
+    "reply_to_msg_id": 41
+  }
+]
