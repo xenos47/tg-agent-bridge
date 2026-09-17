@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tgq.sync</string>
+	<!-- Replace ProgramArguments with an absolute tgq path, or uv:
+	     /usr/local/bin/uv run --directory /path/to/tg-agent-bridge tgq sync -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>tgq</string>
+		<string>sync</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Optional secrets / port:
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>TGQ_TELEGRAM_PORT</key>
+		<string>5222</string>
+	</dict>
+	-->
+	<key>StandardOutPath</key>
+	<string>/tmp/tgq-sync.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/tgq-sync.err.log</string>
+</dict>
+</plist>

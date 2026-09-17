@@ -17,6 +17,7 @@ class UserSettings:
     watchlist: Path | None = None
     session: Path | None = None
     telegram_port: int | None = None
+    sync_interval: int | None = None
 
 
 def default_settings_path(environ: Mapping[str, str] | None = None) -> Path:
@@ -58,12 +59,14 @@ def load_settings(
     except yaml.YAMLError as error:
         raise ValueError(f"invalid settings YAML: {error}") from error
     root = _mapping(raw, "settings")
-    _reject_unknown(root, {"paths", "telegram"}, "settings")
+    _reject_unknown(root, {"paths", "telegram", "sync"}, "settings")
 
     paths = _mapping(root.get("paths", {}), "paths")
     _reject_unknown(paths, {"db", "watchlist", "session"}, "paths")
     telegram = _mapping(root.get("telegram", {}), "telegram")
     _reject_unknown(telegram, {"port"}, "telegram")
+    sync = _mapping(root.get("sync", {}), "sync")
+    _reject_unknown(sync, {"interval"}, "sync")
 
     return UserSettings(
         source=target,
@@ -75,6 +78,7 @@ def load_settings(
             paths.get("session"), target.parent, environment, "paths.session"
         ),
         telegram_port=_port(telegram.get("port")),
+        sync_interval=_interval(sync.get("interval")),
     )
 
 
@@ -130,3 +134,17 @@ def _port(value: Any) -> int | None:
     if not 1 <= port <= 65535:
         raise ValueError("telegram.port must be between 1 and 65535")
     return port
+
+
+def _interval(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("sync.interval must be an integer")
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("sync.interval must be an integer") from error
+    if interval < 1:
+        raise ValueError("sync.interval must be at least 1")
+    return interval

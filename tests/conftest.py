@@ -18,6 +18,7 @@ def isolate_tgq_path_settings(
         "TGQ_CONFIG",
         "TGQ_SESSION",
         "TGQ_TELEGRAM_PORT",
+        "TGQ_SYNC_INTERVAL",
     ):
         monkeypatch.delenv(name, raising=False)
 

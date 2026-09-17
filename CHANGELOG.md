@@ -9,6 +9,9 @@
   unwatched peers or messages to the SQLite mirror.
 - Add optional XDG user settings for database, watchlist, session, and Telegram
   port paths while preserving existing CLI and environment overrides.
+- Add oneshot systemd/launchd templates and a non-blocking sync flock so a
+  background timer can refresh the mirror without agents calling `tgq sync`.
+- Add `sync.interval` / `TGQ_SYNC_INTERVAL` precedence for foreground `--loop`.
 
 ## 0.1.0 — 2026-09-16
 

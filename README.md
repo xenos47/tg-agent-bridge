@@ -66,6 +66,9 @@ paths:
 
 telegram:
   port: 443
+
+sync:
+  interval: 60
 ```
 
 Paths in this file expand `~` and environment variables. Relative paths are
@@ -73,7 +76,9 @@ resolved from the settings file directory. Override the file itself with
 `--settings PATH` or `TGQ_SETTINGS`. Value precedence is CLI option, existing
 `TGQ_*` environment variable, user settings, then the previous default.
 Existing path exports and repository-local `watchlist.yaml` / `tgq.session`
-work unchanged when no settings file exists.
+work unchanged when no settings file exists. For foreground `tgq sync --loop`,
+`--interval` / `TGQ_SYNC_INTERVAL` / `sync.interval` share that precedence
+(default 60; the engine still floors at once per minute per peer).
 
 Resolve a peer named by the human before the first sync. This command reads only
 peer metadata, does not require `--db`, and does not add anything to the mirror:
@@ -102,13 +107,49 @@ The environment variable overrides user settings and the legacy
 HTTP(S) proxy variables do not carry raw MTProto; the port override is explicit
 and never triggers automatic port cycling.
 
+## Background sync (timer)
+
+Agents should read the mirror (`search`, `digest`, `tail`, `peers`, `doctor`)
+and must not call `tgq sync` — that wastes tokens and races the Telethon
+session. Populate the mirror with an OS oneshot timer that runs `tgq sync`
+every five minutes. Templates live under `contrib/`; edit the `tgq` path, then
+enable locally if you want (this repo does not enable them for you).
+
+**systemd (user):**
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp contrib/systemd/tgq-sync.service contrib/systemd/tgq-sync.timer \
+  ~/.config/systemd/user/
+# Edit ExecStart to an absolute tgq, or:
+#   ExecStart=/usr/bin/uv run --directory /path/to/tg-agent-bridge tgq sync
+systemctl --user daemon-reload
+systemctl --user enable --now tgq-sync.timer
+systemctl --user status tgq-sync.timer
+```
+
+**launchd (macOS):**
+
+```bash
+cp contrib/launchd/com.tgq.sync.plist ~/Library/LaunchAgents/
+# Edit ProgramArguments to an absolute tgq or uv run --directory ...
+launchctl load ~/Library/LaunchAgents/com.tgq.sync.plist
+launchctl list com.tgq.sync
+```
+
+Overlapping runs take a non-blocking flock next to the session file
+(`sync.lock`). If another sync holds the lock, the new process logs and exits 0
+so the timer stays green. Prefer oneshot ticks over a long-lived
+`tgq sync --loop` so the session is released between runs (resolve / sender can
+reuse it). `--loop` remains a foreground helper for manual debugging.
+
 ## CLI
 
 ```bash
-# Populate/update the mirror. All Telegram reads are limited to watchlist.yaml.
+# Human / daemon: populate the mirror (watchlist.yaml only). Prefer a timer.
 uv run tgq sync
 
-# Search the local mirror
+# Agent: search the local mirror — do not run sync
 uv run tgq --format jsonl search --tag urgent --since 24h
 uv run tgq search --peer work-chat --q "release OR deploy" --limit 20
 
