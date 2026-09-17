@@ -443,3 +443,106 @@ def test_no_settings_preserves_existing_defaults(tmp_path: Path) -> None:
     assert settings.db is None
     assert args.db is None
     assert args.config == "watchlist.yaml"
+
+
+def test_sync_interval_precedence(tmp_path: Path) -> None:
+    settings = tmp_path / "config.yaml"
+    settings.write_text("sync:\n  interval: 180\n")
+
+    from_settings = _parser().parse_args(["--settings", str(settings), "sync"])
+    _apply_user_settings(from_settings, environ={})
+    assert from_settings.interval == 180
+
+    from_env = _parser().parse_args(["--settings", str(settings), "sync"])
+    _apply_user_settings(from_env, environ={"TGQ_SYNC_INTERVAL": "240"})
+    assert from_env.interval == 240
+
+    from_cli = _parser().parse_args(
+        ["--settings", str(settings), "sync", "--interval", "300"]
+    )
+    _apply_user_settings(from_cli, environ={"TGQ_SYNC_INTERVAL": "240"})
+    assert from_cli.interval == 300
+
+    defaulted = _parser().parse_args(["sync"])
+    _apply_user_settings(
+        defaulted,
+        environ={
+            "HOME": str(tmp_path),
+            "XDG_CONFIG_HOME": str(tmp_path / "missing"),
+        },
+    )
+    assert defaulted.interval == 60
+
+
+def test_overlapping_sync_skips_without_starting_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watchlist = tmp_path / "watchlist.yaml"
+    watchlist.write_text("peers: []\n")
+    session = tmp_path / "tgq.session"
+    session.write_text("")
+    called = False
+
+    async def boom(*_: object, **__: object) -> int:
+        nonlocal called
+        called = True
+        raise AssertionError("run_sync must not start while lock is held")
+
+    monkeypatch.setattr("tgbridge.sync.runtime.run_sync", boom)
+    from tgbridge.sync.lock import try_acquire_sync_lock
+
+    with try_acquire_sync_lock(tmp_path / "sync.lock") as held:
+        assert held is True
+        assert (
+            main(
+                [
+                    "--db",
+                    str(tmp_path / "messages.sqlite"),
+                    "--config",
+                    str(watchlist),
+                    "sync",
+                    "--session",
+                    str(session),
+                    "--dry-run",
+                ]
+            )
+            == 0
+        )
+    assert called is False
+
+
+def test_sync_loop_uses_configured_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watchlist = tmp_path / "watchlist.yaml"
+    watchlist.write_text("peers: []\n")
+    settings = tmp_path / "config.yaml"
+    settings.write_text(
+        "paths:\n"
+        f"  db: {tmp_path / 'messages.sqlite'}\n"
+        "  watchlist: watchlist.yaml\n"
+        "  session: tgq.session\n"
+        "sync:\n"
+        "  interval: 180\n"
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_loop(
+        connection: object,
+        config: Config,
+        *,
+        session: str,
+        interval: int,
+    ) -> None:
+        del connection, config
+        observed["session"] = session
+        observed["interval"] = interval
+
+    monkeypatch.setattr("tgbridge.sync.runtime.run_sync_loop", fake_loop)
+    assert main(["--settings", str(settings), "sync", "--loop"]) == 0
+    assert observed == {
+        "session": str(tmp_path / "tgq.session"),
+        "interval": 180,
+    }

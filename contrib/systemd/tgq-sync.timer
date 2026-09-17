@@ -1,0 +1,13 @@
+[Unit]
+Description=Run tg-agent-bridge sync every 5 minutes
+Documentation=https://github.com/xenos47/tg-agent-bridge
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=300
+AccuracySec=30s
+Persistent=true
+Unit=tgq-sync.service
+
+[Install]
+WantedBy=timers.target

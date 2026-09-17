@@ -5,3 +5,6 @@ paths:
 
 telegram:
   port: 443
+
+sync:
+  interval: 60

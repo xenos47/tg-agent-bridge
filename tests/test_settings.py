@@ -40,6 +40,8 @@ def test_paths_expand_and_resolve_relative_to_settings_file(tmp_path: Path) -> N
         "  session: ${SESSION_DIR}/tgq.session\n"
         "telegram:\n"
         "  port: 5222\n"
+        "sync:\n"
+        "  interval: 120\n"
     )
     settings = load_settings(
         target,
@@ -53,6 +55,7 @@ def test_paths_expand_and_resolve_relative_to_settings_file(tmp_path: Path) -> N
     assert settings.watchlist == home / "watchlist.yaml"
     assert settings.session == tmp_path / "sessions" / "tgq.session"
     assert settings.telegram_port == 5222
+    assert settings.sync_interval == 120
 
 
 @pytest.mark.parametrize(
@@ -61,6 +64,7 @@ def test_paths_expand_and_resolve_relative_to_settings_file(tmp_path: Path) -> N
         "api_hash: secret\n",
         "paths:\n  db: db.sqlite\n  token: secret\n",
         "telegram:\n  phone: '+123'\n",
+        "sync:\n  token: secret\n",
     ],
 )
 def test_unknown_and_secret_settings_are_rejected(
@@ -84,4 +88,12 @@ def test_invalid_settings_port_is_rejected(tmp_path: Path, value: str) -> None:
     target = tmp_path / "config.yaml"
     target.write_text(f"telegram:\n  port: {value}\n")
     with pytest.raises(ValueError, match=r"telegram\.port"):
+        load_settings(target, environ={})
+
+
+@pytest.mark.parametrize("value", ["bad", "0", "true", "-1"])
+def test_invalid_settings_interval_is_rejected(tmp_path: Path, value: str) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text(f"sync:\n  interval: {value}\n")
+    with pytest.raises(ValueError, match=r"sync\.interval"):
         load_settings(target, environ={})

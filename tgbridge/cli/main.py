@@ -25,6 +25,7 @@ from tgbridge.db import connect, migrate
 from tgbridge.logging import configure_logging, event, get_logger
 from tgbridge.outbox import Outbox
 from tgbridge.settings import UserSettings, load_settings
+from tgbridge.sync.lock import sync_lock_path, try_acquire_sync_lock
 from tgbridge.sync.models import Message
 
 FORMAT_VERSION = 1
@@ -68,7 +69,7 @@ def _parser() -> argparse.ArgumentParser:
     sync.add_argument("--session")
     sync.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     sync.add_argument("--loop", action="store_true")
-    sync.add_argument("--interval", type=int, default=60)
+    sync.add_argument("--interval", type=int)
 
     send = sub.add_parser("send")
     send.add_argument("--peer", required=True)
@@ -183,6 +184,13 @@ def _apply_user_settings(
     args.telegram_port = environment.get(
         "TGQ_TELEGRAM_PORT", settings.telegram_port
     )
+    if hasattr(args, "interval"):
+        args.interval = _select_interval(
+            args.interval,
+            environment.get("TGQ_SYNC_INTERVAL"),
+            settings.sync_interval,
+            60,
+        )
     return settings
 
 
@@ -195,6 +203,24 @@ def _select(
     for value in (cli_value, environment_value, settings_value):
         if value is not None:
             return str(value) if isinstance(value, Path) else value
+    return default
+
+
+def _select_interval(
+    cli_value: int | None,
+    environment_value: str | None,
+    settings_value: int | None,
+    default: int,
+) -> int:
+    if cli_value is not None:
+        return int(cli_value)
+    if environment_value is not None:
+        try:
+            return int(environment_value)
+        except ValueError as error:
+            raise ValueError("TGQ_SYNC_INTERVAL must be an integer") from error
+    if settings_value is not None:
+        return int(settings_value)
     return default
 
 
@@ -276,22 +302,35 @@ def _dispatch(
         config = _load_watchlist(args)
         from tgbridge.sync.runtime import run_sync, run_sync_loop
 
-        if args.loop:
-            if args.dry_run:
-                raise ValueError("--loop cannot be combined with --dry-run")
-            asyncio.run(
-                run_sync_loop(
-                    connection,
-                    config,
-                    session=args.session,
-                    interval=args.interval,
+        lock_path = sync_lock_path(args.session)
+        with try_acquire_sync_lock(lock_path) as acquired:
+            if not acquired:
+                event(
+                    _LOG,
+                    20,
+                    "sync_skipped",
+                    reason="lock_held",
+                    lock=str(lock_path),
+                )
+                return None
+            if args.loop:
+                if args.dry_run:
+                    raise ValueError("--loop cannot be combined with --dry-run")
+                asyncio.run(
+                    run_sync_loop(
+                        connection,
+                        config,
+                        session=args.session,
+                        interval=args.interval,
+                    )
+                )
+                return None
+            count = asyncio.run(
+                run_sync(
+                    connection, config, session=args.session, dry_run=args.dry_run
                 )
             )
-            return []
-        count = asyncio.run(
-            run_sync(connection, config, session=args.session, dry_run=args.dry_run)
-        )
-        return [{"fetched": count, "dry_run": args.dry_run}]
+            return [{"fetched": count, "dry_run": args.dry_run}]
     if args.command == "send":
         outbox = Outbox(connection, _load_watchlist(args))
         item_id = outbox.enqueue(

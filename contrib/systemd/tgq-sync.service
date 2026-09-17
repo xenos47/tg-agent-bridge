@@ -1,0 +1,15 @@
+[Unit]
+Description=tg-agent-bridge oneshot Telegram sync
+Documentation=https://github.com/xenos47/tg-agent-bridge
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Replace with an absolute path to tgq, or:
+#   ExecStart=/usr/bin/uv run --directory /path/to/tg-agent-bridge tgq sync
+ExecStart=tgq sync
+# Optional: EnvironmentFile=%h/.config/tgq/secrets.env
+# Optional: Environment=TGQ_TELEGRAM_PORT=5222
+
+[Install]
+WantedBy=default.target
