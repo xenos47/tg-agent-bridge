@@ -15,8 +15,10 @@
 - Wire `rescan` into `tgq sync` (at most once per hour per peer, skipped during
   FloodWait cooldown) so edits and deletions in the last ~200 messages per
   peer reach the mirror. Fixes a window/batch-size mismatch that could have
-  soft-deleted messages that still exist remotely. Adds migration `002`
-  (`sync_state.last_rescan_at`).
+  soft-deleted messages that still exist remotely. Rescan rewrites only
+  mirrored rows that changed, never inserts ahead of the incremental cursor,
+  and `--dry-run` logs the edits and deletions it would apply. Adds migration
+  `002` (`sync_state.last_rescan_at`).
 
 ## 0.1.0 — 2026-09-16
 

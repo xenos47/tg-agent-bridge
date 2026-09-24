@@ -143,11 +143,13 @@ so the timer stays green. Prefer oneshot ticks over a long-lived
 `tgq sync --loop` so the session is released between runs (resolve / sender can
 reuse it). `--loop` remains a foreground helper for manual debugging.
 
-Each `tgq sync` tick also rescans the most recent ~200 messages per peer, at
-most once per hour per peer, to pick up edits and deletions that happened
-after the original fetch. Edits and deletions older than that window, or that
-land between two rescans of the same peer, are not detected — this trades
-completeness for a bounded number of extra API calls per timer tick.
+`tgq sync` also rescans the most recent ~200 messages of each peer, at most
+once per hour per peer and never during a FloodWait/error cooldown, to pick up
+edits and deletions that happened after the original fetch. Rescan rewrites
+only messages already in the mirror that actually changed; new messages are
+left to the incremental cursor. Edits and deletions older than that window are
+not detected, and changes inside it can take up to an hour to appear — this
+trades completeness for a bounded number of extra API calls.
 
 ## CLI
 
