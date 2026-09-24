@@ -151,6 +151,37 @@ left to the incremental cursor. Edits and deletions older than that window are
 not detected, and changes inside it can take up to an hour to appear — this
 trades completeness for a bounded number of extra API calls.
 
+## Sync policies
+
+Each watched peer follows a named policy from `watchlist.yaml`:
+
+```yaml
+policies:
+  fresh:
+    history: 14d     # backfill depth: <n>d, <n>w or `all`
+    retention: 14d   # optional: hard-delete messages older than this
+  archive:
+    history: all
+
+default_policy: fresh   # peers without `policy:`
+
+peers:
+  - slug: devops_jobs_feed
+    policy: fresh
+```
+
+- A new peer starts from its newest messages; backfill then walks down until it
+  reaches the `history` cutoff (message date) or the beginning of the chat.
+- Deepening `history` later (for example `14d` → `all`) resumes backfill from
+  the oldest mirrored message. Making it shallower only stops backfill; it does
+  not delete anything by itself.
+- `retention` **hard-deletes** older messages, their tags and search entries on
+  every sync. `slug#msg_id` handles to pruned messages stop resolving.
+  `retention` must not be shorter than `history`.
+- Without `default_policy`, peers get `history: 14d` and no retention, so an
+  existing mirror is never pruned by an upgrade.
+- Unknown keys, unknown policy names and malformed durations are errors.
+
 ## CLI
 
 ```bash
@@ -189,6 +220,7 @@ Writes support `--dry-run`. Secrets belong in the environment or `~/.config/tgq/
 |------|-----|
 | Message PK is `(peer_id, msg_id)` | `msg_id` is unique only within a dialog |
 | Soft delete via `deleted_at`, set by rescan | Agents that already cited a handle still get a clear answer |
+| Retention pruning is a hard delete | Policy-expired history leaves the unencrypted mirror entirely |
 | Tags in a separate table with `source` | Distinguish rule / manual / agent tags; never a CSV field |
 | Always store `raw_json` | Retag and new fields without re-downloading history |
 | Time is UTC unix int | Keeps `--since` comparisons and indexes honest |

@@ -1,6 +1,7 @@
 """Configuration and watchlist loading."""
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,7 +9,13 @@ from typing import Any
 
 import yaml
 
-from tgbridge.sync.models import Peer, TagRule
+from tgbridge.sync.models import Peer, SyncPolicy, TagRule
+
+_DAY = 86400
+_DURATION = re.compile(r"^([1-9]\d*)([dw])$")
+# Used when a watchlist has no `default_policy`: shallow backfill, but never
+# deletes data that an older unbounded configuration already mirrored.
+DEFAULT_POLICY = SyncPolicy(history=14 * _DAY)
 
 
 @dataclass(frozen=True)
@@ -105,6 +112,59 @@ def _port(value: Any) -> int:
     return port
 
 
+def _duration(value: Any, label: str) -> int:
+    match = _DURATION.match(str(value)) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError(f"{label} must be a duration like 14d or 2w, got {value!r}")
+    return int(match.group(1)) * _DAY * (7 if match.group(2) == "w" else 1)
+
+
+def _policy(name: str, raw: Any) -> SyncPolicy:
+    label = f"policies.{name}"
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a YAML mapping")
+    unknown = sorted(set(raw) - {"history", "retention"})
+    if unknown:
+        raise ValueError(f"unknown {label} setting: {unknown[0]}")
+    if "history" not in raw:
+        raise ValueError(f"{label}.history is required (a duration or 'all')")
+    history = None if raw["history"] == "all" else _duration(raw["history"], f"{label}.history")
+    retention = raw.get("retention")
+    if retention is None:
+        return SyncPolicy(history=history)
+    retention_seconds = _duration(retention, f"{label}.retention")
+    if history is None or retention_seconds < history:
+        raise ValueError(
+            f"{label}.retention must not be shorter than history; "
+            "otherwise backfilled messages are deleted again on every sync"
+        )
+    return SyncPolicy(history=history, retention=retention_seconds)
+
+
+def _policies(raw: Mapping[str, Any]) -> tuple[dict[str, SyncPolicy], SyncPolicy]:
+    section = raw.get("policies") or {}
+    if not isinstance(section, dict):
+        raise ValueError("policies must be a YAML mapping")
+    policies = {str(name): _policy(str(name), value) for name, value in section.items()}
+    default_name = raw.get("default_policy")
+    if default_name is None:
+        return policies, DEFAULT_POLICY
+    if default_name not in policies:
+        raise ValueError(f"default_policy refers to unknown policy {default_name!r}")
+    return policies, policies[default_name]
+
+
+def _peer_policy(
+    item: Mapping[str, Any], policies: Mapping[str, SyncPolicy], default: SyncPolicy
+) -> SyncPolicy:
+    name = item.get("policy")
+    if name is None:
+        return default
+    if name not in policies:
+        raise ValueError(f"peer {item.get('slug')!r} refers to unknown policy {name!r}")
+    return policies[name]
+
+
 def load_config(
     path: str | Path,
     *,
@@ -114,6 +174,7 @@ def load_config(
     """Load a privacy-bounded watchlist and policy configuration."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     environment = os.environ if environ is None else environ
+    policies, default_policy = _policies(raw)
     telegram = raw.get("telegram", {})
     configured_port = telegram.get("port", 443)
     selected_port = (
@@ -130,8 +191,9 @@ def load_config(
             username=item.get("username"),
             sendable=bool(item.get("sendable", False)),
             priority=int(item.get("priority", 0)),
+            policy=_peer_policy(item, policies, default_policy),
         )
-        for item in raw.get("peers", [])
+        for item in raw.get("peers") or []
     )
     rules = tuple(
         TagRule(

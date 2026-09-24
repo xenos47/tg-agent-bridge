@@ -1,9 +1,10 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from tgbridge.config import append_peer, format_peer_yaml, load_config
-from tgbridge.sync.models import Peer
+from tgbridge.config import DEFAULT_POLICY, append_peer, format_peer_yaml, load_config
+from tgbridge.sync.models import Peer, SyncPolicy
 
 
 def config_file(tmp_path: Path, content: str = "peers: []\n") -> Path:
@@ -63,9 +64,61 @@ def test_append_peer_writes_and_rejects_duplicates(tmp_path: Path) -> None:
     path = config_file(tmp_path)
     peer = Peer(-100123, "work-chat", "group", "Work Chat")
     append_peer(path, peer)
-    assert load_config(path).peers == (peer,)
+    assert load_config(path).peers == (replace(peer, policy=DEFAULT_POLICY),)
 
     with pytest.raises(ValueError, match="peer id already exists"):
         append_peer(path, Peer(-100123, "other", "group", "Other"))
     with pytest.raises(ValueError, match="peer slug already exists"):
         append_peer(path, Peer(-100456, "work-chat", "group", "Other"))
+
+
+POLICY_WATCHLIST = """
+policies:
+  fresh: {history: 14d, retention: 2w}
+  archive: {history: all}
+default_policy: fresh
+peers:
+  - {slug: jobs, id: 1, kind: channel}
+  - {slug: team, id: 2, kind: group, policy: archive}
+"""
+
+
+def test_peers_get_named_or_default_policy(tmp_path: Path) -> None:
+    peers = load_config(config_file(tmp_path, POLICY_WATCHLIST), environ={}).peers
+    day = 86400
+    assert [peer.policy for peer in peers] == [
+        SyncPolicy(history=14 * day, retention=14 * day),
+        SyncPolicy(history=None, retention=None),
+    ]
+
+
+def test_watchlist_without_policies_uses_shallow_default_without_retention(
+    tmp_path: Path,
+) -> None:
+    path = config_file(tmp_path, "peers:\n  - {slug: jobs, id: 1, kind: channel}\n")
+    (peer,) = load_config(path, environ={}).peers
+    assert peer.policy == DEFAULT_POLICY
+    assert DEFAULT_POLICY.retention is None
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("policies: {p: {history: 14d, keep: 1d}}", "unknown policies.p setting: keep"),
+        ("policies: {p: {retention: 14d}}", "policies.p.history is required"),
+        ("policies: {p: {history: 14 days}}", "duration like 14d"),
+        ("policies: {p: {history: 0d}}", "duration like 14d"),
+        ("policies: {p: {history: 14d, retention: 7d}}", "must not be shorter"),
+        ("policies: {p: {history: all, retention: 7d}}", "must not be shorter"),
+        ("default_policy: missing", "unknown policy 'missing'"),
+        (
+            "peers:\n  - {slug: jobs, id: 1, kind: channel, policy: missing}",
+            "peer 'jobs' refers to unknown policy 'missing'",
+        ),
+    ],
+)
+def test_invalid_policy_config_is_rejected(
+    tmp_path: Path, content: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_config(config_file(tmp_path, content + "\n"), environ={})

@@ -19,6 +19,13 @@
   mirrored rows that changed, never inserts ahead of the incremental cursor,
   and `--dry-run` logs the edits and deletions it would apply. Adds migration
   `002` (`sync_state.last_rescan_at`).
+- Add per-peer sync policies in `watchlist.yaml` (`policies`, `default_policy`,
+  `peers[].policy`): `history` limits backfill depth and `retention`
+  hard-deletes older messages. Watchlists without policies now backfill 14
+  days instead of the whole history and never prune. Adds migration `003`
+  (`sync_state.backfill_cutoff_ts`).
+- Fix a fresh peer starting incremental sync from its oldest message, which
+  delayed new messages until the cursor crawled through the whole history.
 
 ## 0.1.0 — 2026-09-16
 

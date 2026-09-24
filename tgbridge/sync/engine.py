@@ -92,9 +92,8 @@ class SyncEngine:
 
     async def incremental(self, peer: Peer, *, dry_run: bool = False) -> SyncResult:
         state = self._state(peer.peer_id, allow_missing=dry_run)
-        if state is None:
-            messages = await self._collect(peer.peer_id, min_id=0, reverse=True)
-            return self._result(peer.peer_id, "incremental", messages, 0)
+        if state is None or int(state["last_msg_id"]) == 0:
+            return await self._start(peer, state, dry_run=dry_run)
         if self._cooling_down(state):
             return SyncResult(peer.peer_id, "incremental", 0, 0)
         messages = await self._collect(
@@ -102,30 +101,92 @@ class SyncEngine:
         )
         return self._persist(peer.peer_id, messages, "incremental", dry_run=dry_run)
 
-    async def backfill(self, peer: Peer, *, dry_run: bool = False) -> SyncResult:
-        state = self._state(peer.peer_id, allow_missing=dry_run)
-        if state is None:
-            messages = await self._collect(peer.peer_id, limit=self.batch_size)
-            return self._result(peer.peer_id, "backfill", messages, 0)
-        if int(state["backfill_done"]):
-            return SyncResult(peer.peer_id, "backfill", 0, 0)
-        offset = state["backfill_cursor"]
-        messages = await self._collect(
-            peer.peer_id, offset_id=int(offset or 0), limit=self.batch_size
-        )
-        if dry_run:
-            return self._result(peer.peer_id, "backfill", messages, 0)
+    async def _start(
+        self, peer: Peer, state: sqlite3.Row | None, *, dry_run: bool
+    ) -> SyncResult:
+        """First sync of a peer: take the newest batch and put the cursor at the top.
+
+        Crawling up from min_id=0 would start at the oldest message in the
+        channel and leave new messages unmirrored until it reached the top.
+        Older history is left to backfill, which continues below this batch.
+        """
+        if state is not None and self._cooling_down(state):
+            return SyncResult(peer.peer_id, "incremental", 0, 0)
+        cutoff = self._history_cutoff(peer)
+        fetched = await self._collect(peer.peer_id, limit=self.batch_size)
+        kept = self._within_history(fetched, cutoff)
+        if dry_run or state is None or not fetched:
+            return self._result(peer.peer_id, "incremental", kept, 0)
+        crossed = len(kept) < len(fetched)
+        done = crossed or len(fetched) < self.batch_size
         with transaction(self.connection):
-            self.upsert_many(messages)
-            cursor = min((message.msg_id for message in messages), default=None)
+            self.upsert_many(kept)
             self.connection.execute(
                 """
                 UPDATE sync_state
-                SET backfill_cursor=?, backfill_done=?, last_synced_at=?,
-                    last_error=NULL, error_count=0
+                SET last_msg_id=?, backfill_cursor=?, backfill_done=?, backfill_cutoff_ts=?,
+                    last_synced_at=?, last_error=NULL, error_count=0, cooldown_until=NULL
                 WHERE peer_id=?
                 """,
-                (cursor, int(len(messages) < self.batch_size), self.now(), peer.peer_id),
+                (
+                    max(message.msg_id for message in fetched),
+                    min(message.msg_id for message in fetched),
+                    int(done),
+                    cutoff if crossed else None,
+                    self.now(),
+                    peer.peer_id,
+                ),
+            )
+        event(
+            _LOG,
+            20,
+            "sync_cursor_advanced",
+            peer=peer.slug,
+            cursor=max(message.msg_id for message in fetched),
+            batch_size=len(kept),
+        )
+        return self._result(peer.peer_id, "incremental", kept, len(kept))
+
+    async def backfill(self, peer: Peer, *, dry_run: bool = False) -> SyncResult:
+        state = self._state(peer.peer_id, allow_missing=dry_run)
+        cutoff = self._history_cutoff(peer)
+        if state is None:
+            messages = await self._collect(peer.peer_id, limit=self.batch_size)
+            return self._result(peer.peer_id, "backfill", self._within_history(messages, cutoff), 0)
+        if int(state["backfill_done"]):
+            if not self._history_deepened(state, cutoff):
+                return SyncResult(peer.peer_id, "backfill", 0, 0)
+            # Resume below the oldest message still mirrored: retention may have
+            # removed rows above the old cursor, and they must be refetched.
+            offset = self.connection.execute(
+                "SELECT min(msg_id) FROM messages WHERE peer_id=?", (peer.peer_id,)
+            ).fetchone()[0]
+        else:
+            offset = state["backfill_cursor"]
+        fetched = await self._collect(
+            peer.peer_id, offset_id=int(offset or 0), limit=self.batch_size
+        )
+        messages = self._within_history(fetched, cutoff)
+        if dry_run:
+            return self._result(peer.peer_id, "backfill", messages, 0)
+        crossed = len(messages) < len(fetched)
+        with transaction(self.connection):
+            self.upsert_many(messages)
+            cursor = min((message.msg_id for message in fetched), default=None)
+            self.connection.execute(
+                """
+                UPDATE sync_state
+                SET backfill_cursor=?, backfill_done=?, backfill_cutoff_ts=?,
+                    last_synced_at=?, last_error=NULL, error_count=0
+                WHERE peer_id=?
+                """,
+                (
+                    cursor,
+                    int(crossed or len(fetched) < self.batch_size),
+                    cutoff if crossed else None,
+                    self.now(),
+                    peer.peer_id,
+                ),
             )
         event(
             _LOG,
@@ -136,6 +197,47 @@ class SyncEngine:
             batch_size=len(messages),
         )
         return self._result(peer.peer_id, "backfill", messages, len(messages))
+
+    def prune(self, peer: Peer, *, dry_run: bool = False) -> int:
+        """Hard-delete mirrored messages older than the peer's retention.
+
+        Tags go with them via ON DELETE CASCADE and FTS rows via the delete trigger.
+        """
+        if peer.policy.retention is None:
+            return 0
+        cutoff = self.now() - peer.policy.retention
+        if dry_run:
+            count = self.connection.execute(
+                "SELECT count(*) FROM messages WHERE peer_id=? AND ts<?",
+                (peer.peer_id, cutoff),
+            ).fetchone()[0]
+            return int(count)
+        with transaction(self.connection):
+            deleted = self.connection.execute(
+                "DELETE FROM messages WHERE peer_id=? AND ts<?", (peer.peer_id, cutoff)
+            ).rowcount
+        if deleted:
+            event(_LOG, 20, "peer_pruned", peer=peer.slug, deleted=deleted)
+        return deleted
+
+    def _history_cutoff(self, peer: Peer) -> int | None:
+        history = peer.policy.history
+        return None if history is None else self.now() - history
+
+    @staticmethod
+    def _within_history(messages: Sequence[Message], cutoff: int | None) -> list[Message]:
+        # Backfill and the first fetch read newest-first, so everything after the
+        # first message older than the cutoff is older too.
+        if cutoff is None:
+            return list(messages)
+        return [message for message in messages if message.ts >= cutoff]
+
+    @staticmethod
+    def _history_deepened(state: sqlite3.Row, cutoff: int | None) -> bool:
+        stopped_at = state["backfill_cutoff_ts"]
+        if stopped_at is None:
+            return False  # backfill reached the beginning of the history
+        return cutoff is None or cutoff < int(stopped_at)
 
     async def rescan(
         self,

@@ -6,7 +6,7 @@ import pytest
 
 from tgbridge.logging import configure_logging
 from tgbridge.sync.engine import SyncEngine
-from tgbridge.sync.models import Message, Peer, TagRule
+from tgbridge.sync.models import Message, Peer, SyncPolicy, TagRule
 
 
 class FakeClient:
@@ -93,10 +93,10 @@ async def test_rescan_window_larger_than_batch_size_does_not_wrongly_delete(
     client = FakeClient([msg(i) for i in range(1, 161)])
     first = SyncEngine(db, client, batch_size=150, now=lambda: 1700001000)
     first.register_peer(peer)
-    await first.incremental(peer)  # capped at batch_size: writes 1..150
+    await first.incremental(peer)  # newest batch: writes 11..160
 
     second = SyncEngine(db, client, batch_size=150, now=lambda: 1700001100)
-    await second.incremental(peer)  # writes the remaining 151..160
+    await second.backfill(peer)  # writes the remaining 1..10
     assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 160
 
     rescan = SyncEngine(db, client, batch_size=150, now=lambda: 1700002000)
@@ -320,18 +320,118 @@ async def test_batch_and_cursor_roll_back_together(db: sqlite3.Connection) -> No
 
 
 @pytest.mark.asyncio
-async def test_backfill_cursor_is_independent_from_fresh_cursor(db: sqlite3.Connection) -> None:
+async def test_fresh_peer_starts_at_newest_and_backfill_walks_down(
+    db: sqlite3.Connection,
+) -> None:
     peer = Peer(1, "work", "group", "Work")
-    fresh = SyncEngine(db, FakeClient([msg(3)]), now=lambda: 1700001000)
-    fresh.register_peer(peer)
-    await fresh.incremental(peer)
-    history = SyncEngine(db, FakeClient([msg(1), msg(2), msg(3)]), now=lambda: 1700001061)
-    await history.backfill(peer)
-    state = db.execute(
-        "SELECT last_msg_id,backfill_cursor,backfill_done FROM sync_state"
-    ).fetchone()
-    assert tuple(state) == (3, 1, 1)
-    assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 3
+    client = FakeClient([msg(i) for i in range(1, 6)])
+    engine = SyncEngine(db, client, batch_size=2, now=lambda: 1700001000)
+    engine.register_peer(peer)
+
+    first = await engine.incremental(peer)
+    assert (first.first_id, first.last_id) == (5, 4)
+    state = db.execute("SELECT last_msg_id,backfill_cursor,backfill_done FROM sync_state")
+    assert tuple(state.fetchone()) == (5, 4, 0)
+
+    client.messages.append(msg(6))
+    later = SyncEngine(db, client, batch_size=2, now=lambda: 1700001100)
+    assert (await later.incremental(peer)).last_id == 6  # new message on the next tick
+    for _ in range(3):
+        await later.backfill(peer)
+    state = db.execute("SELECT last_msg_id,backfill_cursor,backfill_done FROM sync_state")
+    assert tuple(state.fetchone()) == (6, 1, 1)
+    assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 6
+
+
+DAY = 86400
+NOW = 1700000000 + 30 * DAY
+
+
+def dated(msg_id: int, days_ago: int) -> Message:
+    return Message(
+        peer_id=1,
+        msg_id=msg_id,
+        ts=NOW - days_ago * DAY,
+        text=f"m{msg_id}",
+        raw_json=json.dumps({"id": msg_id}),
+    )
+
+
+def ids(db: sqlite3.Connection) -> list[int]:
+    return [row[0] for row in db.execute("SELECT msg_id FROM messages ORDER BY msg_id")]
+
+
+# msg 1 is 20 days old, msg 10 is 2 days old
+HISTORY = [dated(i, 22 - 2 * i) for i in range(1, 11)]
+
+
+@pytest.mark.asyncio
+async def test_backfill_stops_at_history_cutoff(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "jobs", "channel", "Jobs", policy=SyncPolicy(history=7 * DAY))
+    engine = SyncEngine(db, FakeClient(HISTORY), batch_size=2, now=lambda: NOW)
+    engine.register_peer(peer)
+    await engine.incremental(peer)
+    for _ in range(5):
+        await engine.backfill(peer)
+    assert ids(db) == [8, 9, 10]  # 6, 4 and 2 days old
+    state = db.execute("SELECT backfill_done,backfill_cutoff_ts FROM sync_state").fetchone()
+    assert tuple(state) == (1, NOW - 7 * DAY)
+
+
+@pytest.mark.asyncio
+async def test_first_batch_already_past_cutoff_finishes_backfill(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "jobs", "channel", "Jobs", policy=SyncPolicy(history=3 * DAY))
+    engine = SyncEngine(db, FakeClient(HISTORY), batch_size=5, now=lambda: NOW)
+    engine.register_peer(peer)
+    assert (await engine.incremental(peer)).written == 1
+    assert (await engine.backfill(peer)).fetched == 0
+    assert ids(db) == [10]
+    state = db.execute("SELECT last_msg_id,backfill_done FROM sync_state").fetchone()
+    assert tuple(state) == (10, 1)
+
+
+@pytest.mark.asyncio
+async def test_deepening_history_resumes_backfill_without_holes(db: sqlite3.Connection) -> None:
+    shallow = Peer(1, "jobs", "channel", "Jobs", policy=SyncPolicy(history=5 * DAY))
+    engine = SyncEngine(db, FakeClient(HISTORY), batch_size=2, now=lambda: NOW)
+    engine.register_peer(shallow)
+    await engine.incremental(shallow)
+    for _ in range(3):
+        await engine.backfill(shallow)
+    assert ids(db) == [9, 10]
+
+    deep = Peer(1, "jobs", "channel", "Jobs", policy=SyncPolicy(history=None))
+    for _ in range(6):
+        await engine.backfill(deep)
+    assert ids(db) == list(range(1, 11))
+    state = db.execute("SELECT backfill_done,backfill_cutoff_ts FROM sync_state").fetchone()
+    assert tuple(state) == (1, None)
+    assert (await engine.backfill(deep)).fetched == 0  # reached the beginning, stays done
+
+
+@pytest.mark.asyncio
+async def test_prune_hard_deletes_old_messages_tags_and_fts(db: sqlite3.Connection) -> None:
+    policy = SyncPolicy(history=None, retention=7 * DAY)
+    peer = Peer(1, "jobs", "channel", "Jobs", policy=policy)
+    engine = SyncEngine(
+        db,
+        FakeClient(HISTORY),
+        rules=[TagRule("any", "seen", text_regex="m")],
+        now=lambda: NOW,
+    )
+    engine.register_peer(peer)
+    await engine.incremental(peer)
+    assert len(ids(db)) == 10
+
+    assert engine.prune(peer, dry_run=True) == 7
+    assert len(ids(db)) == 10
+    assert engine.prune(peer) == 7
+    assert ids(db) == [8, 9, 10]
+    assert db.execute("SELECT count(*) FROM tags").fetchone()[0] == 3
+    fts = "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?"
+    assert db.execute(fts, ("m1",)).fetchone()[0] == 0
+    assert db.execute(fts, ("m10",)).fetchone()[0] == 1
+    assert engine.prune(Peer(1, "jobs", "channel", "Jobs")) == 0  # no retention
 
 
 def test_repeated_errors_persist_cooldown(db: sqlite3.Connection) -> None:
