@@ -138,32 +138,111 @@ class SyncEngine:
         return self._result(peer.peer_id, "backfill", messages, len(messages))
 
     async def rescan(
-        self, peer: Peer, *, window: int = 200, dry_run: bool = False
+        self,
+        peer: Peer,
+        *,
+        window: int = 200,
+        interval: int = 3600,
+        dry_run: bool = False,
     ) -> SyncResult:
+        """Detect edits and deletions within the last `window` messages.
+
+        Throttled to once per `interval` seconds per peer (tracked via
+        `sync_state.last_rescan_at`) and skipped during a FloodWait/error
+        cooldown. Only rows already in the mirror are rewritten, and only when
+        they changed; new messages are left to incremental/backfill so rescan
+        never writes ahead of the sync cursor.
+        """
+        state = self._state(peer.peer_id, allow_missing=dry_run)
+        if state is not None:
+            # Deliberately not _cooling_down(): its 60s last_synced_at floor would
+            # skip rescan on every tick where incremental/backfill just wrote.
+            cooldown = state["cooldown_until"]
+            if cooldown is not None and int(cooldown) > self.now():
+                return SyncResult(peer.peer_id, "rescan", 0, 0)
+            last_rescan_at = state["last_rescan_at"]
+            if last_rescan_at is not None and self.now() - int(last_rescan_at) < interval:
+                return SyncResult(peer.peer_id, "rescan", 0, 0)
         remote = await self._collect(peer.peer_id, limit=window)
-        local_rows = self.connection.execute(
-            """
-            SELECT msg_id FROM messages
-            WHERE peer_id=? ORDER BY msg_id DESC LIMIT ?
-            """,
-            (peer.peer_id, window),
-        ).fetchall()
-        remote_ids = {message.msg_id for message in remote}
-        deleted = [int(row["msg_id"]) for row in local_rows if int(row["msg_id"]) not in remote_ids]
         if dry_run:
+            changed, deleted_ids = self._rescan_diff(peer.peer_id, remote)
+            self._log_rescan(peer, remote, changed, deleted_ids, result="dry_run")
             return self._result(peer.peer_id, "rescan", remote, 0)
         with transaction(self.connection):
-            self.upsert_many(remote)
-            if deleted:
-                placeholders = ",".join("?" for _ in deleted)
+            changed, deleted_ids = self._rescan_diff(peer.peer_id, remote)
+            self.upsert_many(changed)
+            if deleted_ids:
+                placeholders = ",".join("?" for _ in deleted_ids)
                 self.connection.execute(
                     f"""
                     UPDATE messages SET deleted_at=?
                     WHERE peer_id=? AND msg_id IN ({placeholders}) AND deleted_at IS NULL
                     """,
-                    (self.now(), peer.peer_id, *deleted),
+                    (self.now(), peer.peer_id, *deleted_ids),
                 )
-        return self._result(peer.peer_id, "rescan", remote, len(remote) + len(deleted))
+            self.connection.execute(
+                "UPDATE sync_state SET last_rescan_at=? WHERE peer_id=?",
+                (self.now(), peer.peer_id),
+            )
+        self._log_rescan(peer, remote, changed, deleted_ids, result="applied")
+        return self._result(peer.peer_id, "rescan", remote, len(changed) + len(deleted_ids))
+
+    def _rescan_diff(
+        self, peer_id: int, remote: Sequence[Message]
+    ) -> tuple[list[Message], list[int]]:
+        """Split a rescan fetch into changed mirrored rows and rows gone remotely."""
+        if not remote:
+            # An empty fetch proves nothing; never treat it as a mass deletion.
+            return [], []
+        # Only judge the range Telegram actually returned; anything below it
+        # simply wasn't fetched this pass.
+        floor = min(message.msg_id for message in remote)
+        rows = self.connection.execute(
+            """
+            SELECT msg_id, text, has_media, media_kind, deleted_at FROM messages
+            WHERE peer_id=? AND msg_id>=?
+            """,
+            (peer_id, floor),
+        ).fetchall()
+        local = {int(row["msg_id"]): row for row in rows}
+        changed = [
+            message
+            for message in remote
+            if (row := local.get(message.msg_id)) is not None
+            and (
+                row["text"] != message.text
+                or bool(row["has_media"]) != message.has_media
+                or row["media_kind"] != message.media_kind
+                or row["deleted_at"] is not None
+            )
+        ]
+        remote_ids = {message.msg_id for message in remote}
+        deleted_ids = [
+            msg_id
+            for msg_id, row in local.items()
+            if msg_id not in remote_ids and row["deleted_at"] is None
+        ]
+        return changed, deleted_ids
+
+    def _log_rescan(
+        self,
+        peer: Peer,
+        remote: Sequence[Message],
+        changed: Sequence[Message],
+        deleted_ids: Sequence[int],
+        *,
+        result: str,
+    ) -> None:
+        event(
+            _LOG,
+            20,
+            "peer_rescan_completed",
+            peer=peer.slug,
+            fetched=len(remote),
+            updated=len(changed),
+            deleted=len(deleted_ids),
+            result=result,
+        )
 
     def record_flood_wait(self, peer_id: int, seconds: int) -> int:
         until = self.now() + seconds + random.randint(5, 30)
@@ -222,6 +301,9 @@ class SyncEngine:
         reverse: bool = False,
         limit: int | None = None,
     ) -> list[Message]:
+        # An explicit limit (e.g. rescan's window) is the true cap; batch_size
+        # only bounds the unbounded incremental/backfill calls.
+        cap = self.batch_size if limit is None else limit
         messages: list[Message] = []
         async for message in self.client.iter_messages(
             peer_id,
@@ -231,7 +313,7 @@ class SyncEngine:
             limit=limit,
         ):
             messages.append(message)
-            if len(messages) >= self.batch_size:
+            if len(messages) >= cap:
                 break
         return messages
 

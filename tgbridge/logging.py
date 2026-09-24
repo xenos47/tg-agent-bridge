@@ -26,6 +26,8 @@ _SAFE_FIELDS = (
     "batch_size",
     "fetched",
     "written",
+    "updated",
+    "deleted",
     "first_id",
     "last_id",
     "cursor",

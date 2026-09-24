@@ -58,14 +58,19 @@ async def run_sync(
                 result = await engine.incremental(peer, dry_run=dry_run)
                 fetched += result.fetched
                 backfill = await engine.backfill(peer, dry_run=dry_run)
+                rescan = await engine.rescan(peer, dry_run=dry_run)
                 event(
                     _LOG,
                     20,
                     "peer_sync_completed",
                     peer=peer.slug,
-                    mode="incremental+backfill",
-                    fetched=result.fetched + backfill.fetched,
-                    written=result.written + backfill.written,
+                    mode=(
+                        "incremental+backfill+rescan"
+                        if rescan.fetched
+                        else "incremental+backfill"
+                    ),
+                    fetched=result.fetched + backfill.fetched + rescan.fetched,
+                    written=result.written + backfill.written + rescan.written,
                     first_id=result.first_id,
                     last_id=result.last_id,
                     duration_ms=int((time.perf_counter() - peer_started) * 1000),

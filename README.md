@@ -143,6 +143,14 @@ so the timer stays green. Prefer oneshot ticks over a long-lived
 `tgq sync --loop` so the session is released between runs (resolve / sender can
 reuse it). `--loop` remains a foreground helper for manual debugging.
 
+`tgq sync` also rescans the most recent ~200 messages of each peer, at most
+once per hour per peer and never during a FloodWait/error cooldown, to pick up
+edits and deletions that happened after the original fetch. Rescan rewrites
+only messages already in the mirror that actually changed; new messages are
+left to the incremental cursor. Edits and deletions older than that window are
+not detected, and changes inside it can take up to an hour to appear — this
+trades completeness for a bounded number of extra API calls.
+
 ## CLI
 
 ```bash
@@ -180,7 +188,7 @@ Writes support `--dry-run`. Secrets belong in the environment or `~/.config/tgq/
 | Rule | Why |
 |------|-----|
 | Message PK is `(peer_id, msg_id)` | `msg_id` is unique only within a dialog |
-| Soft delete via `deleted_at` | Agents that already cited a handle still get a clear answer |
+| Soft delete via `deleted_at`, set by rescan | Agents that already cited a handle still get a clear answer |
 | Tags in a separate table with `source` | Distinguish rule / manual / agent tags; never a CSV field |
 | Always store `raw_json` | Retag and new fields without re-downloading history |
 | Time is UTC unix int | Keeps `--since` comparisons and indexes honest |
