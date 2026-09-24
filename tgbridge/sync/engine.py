@@ -138,32 +138,75 @@ class SyncEngine:
         return self._result(peer.peer_id, "backfill", messages, len(messages))
 
     async def rescan(
-        self, peer: Peer, *, window: int = 200, dry_run: bool = False
+        self,
+        peer: Peer,
+        *,
+        window: int = 200,
+        interval: int = 3600,
+        dry_run: bool = False,
     ) -> SyncResult:
+        """Detect edits and deletions within the last `window` messages.
+
+        Throttled to once per `interval` seconds per peer (tracked via
+        `sync_state.last_rescan_at`) and skipped while a peer is cooling down,
+        so it never adds to FloodWait pressure on top of incremental/backfill.
+        """
+        state = self._state(peer.peer_id, allow_missing=dry_run)
+        if state is not None:
+            if self._cooling_down(state):
+                return SyncResult(peer.peer_id, "rescan", 0, 0)
+            last_rescan_at = state["last_rescan_at"]
+            if last_rescan_at is not None and self.now() - int(last_rescan_at) < interval:
+                return SyncResult(peer.peer_id, "rescan", 0, 0)
         remote = await self._collect(peer.peer_id, limit=window)
-        local_rows = self.connection.execute(
-            """
-            SELECT msg_id FROM messages
-            WHERE peer_id=? ORDER BY msg_id DESC LIMIT ?
-            """,
-            (peer.peer_id, window),
-        ).fetchall()
-        remote_ids = {message.msg_id for message in remote}
-        deleted = [int(row["msg_id"]) for row in local_rows if int(row["msg_id"]) not in remote_ids]
         if dry_run:
             return self._result(peer.peer_id, "rescan", remote, 0)
+        updated = len(remote)
+        deleted_count = 0
         with transaction(self.connection):
-            self.upsert_many(remote)
-            if deleted:
-                placeholders = ",".join("?" for _ in deleted)
-                self.connection.execute(
-                    f"""
-                    UPDATE messages SET deleted_at=?
-                    WHERE peer_id=? AND msg_id IN ({placeholders}) AND deleted_at IS NULL
+            if remote:
+                self.upsert_many(remote)
+                # Only judge messages inside the range Telegram actually returned;
+                # comparing against a wider local window would soft-delete
+                # messages that still exist but simply weren't fetched this pass.
+                floor = min(message.msg_id for message in remote)
+                remote_ids = {message.msg_id for message in remote}
+                local_rows = self.connection.execute(
+                    """
+                    SELECT msg_id FROM messages
+                    WHERE peer_id=? AND msg_id>=? AND deleted_at IS NULL
                     """,
-                    (self.now(), peer.peer_id, *deleted),
-                )
-        return self._result(peer.peer_id, "rescan", remote, len(remote) + len(deleted))
+                    (peer.peer_id, floor),
+                ).fetchall()
+                deleted_ids = [
+                    int(row["msg_id"])
+                    for row in local_rows
+                    if int(row["msg_id"]) not in remote_ids
+                ]
+                if deleted_ids:
+                    placeholders = ",".join("?" for _ in deleted_ids)
+                    self.connection.execute(
+                        f"""
+                        UPDATE messages SET deleted_at=?
+                        WHERE peer_id=? AND msg_id IN ({placeholders}) AND deleted_at IS NULL
+                        """,
+                        (self.now(), peer.peer_id, *deleted_ids),
+                    )
+                    deleted_count = len(deleted_ids)
+            self.connection.execute(
+                "UPDATE sync_state SET last_rescan_at=? WHERE peer_id=?",
+                (self.now(), peer.peer_id),
+            )
+        event(
+            _LOG,
+            20,
+            "peer_rescan_completed",
+            peer=peer.slug,
+            fetched=len(remote),
+            updated=updated,
+            deleted=deleted_count,
+        )
+        return self._result(peer.peer_id, "rescan", remote, updated + deleted_count)
 
     def record_flood_wait(self, peer_id: int, seconds: int) -> int:
         until = self.now() + seconds + random.randint(5, 30)
@@ -222,6 +265,9 @@ class SyncEngine:
         reverse: bool = False,
         limit: int | None = None,
     ) -> list[Message]:
+        # An explicit limit (e.g. rescan's window) is the true cap; batch_size
+        # only bounds the unbounded incremental/backfill calls.
+        cap = self.batch_size if limit is None else limit
         messages: list[Message] = []
         async for message in self.client.iter_messages(
             peer_id,
@@ -231,7 +277,7 @@ class SyncEngine:
             limit=limit,
         ):
             messages.append(message)
-            if len(messages) >= self.batch_size:
+            if len(messages) >= cap:
                 break
         return messages
 

@@ -58,6 +58,7 @@ async def run_sync(
                 result = await engine.incremental(peer, dry_run=dry_run)
                 fetched += result.fetched
                 backfill = await engine.backfill(peer, dry_run=dry_run)
+                await engine.rescan(peer, dry_run=dry_run)
                 event(
                     _LOG,
                     20,

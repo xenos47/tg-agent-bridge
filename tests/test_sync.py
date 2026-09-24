@@ -85,6 +85,101 @@ async def test_rescan_detects_edit_and_soft_delete(db: sqlite3.Connection) -> No
 
 
 @pytest.mark.asyncio
+async def test_rescan_window_larger_than_batch_size_does_not_wrongly_delete(
+    db: sqlite3.Connection,
+) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    client = FakeClient([msg(i) for i in range(1, 161)])
+    first = SyncEngine(db, client, batch_size=150, now=lambda: 1700001000)
+    first.register_peer(peer)
+    await first.incremental(peer)  # capped at batch_size: writes 1..150
+
+    second = SyncEngine(db, client, batch_size=150, now=lambda: 1700001100)
+    await second.incremental(peer)  # writes the remaining 151..160
+    assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 160
+
+    rescan = SyncEngine(db, client, batch_size=150, now=lambda: 1700002000)
+    result = await rescan.rescan(peer, window=200)
+
+    assert result.fetched == 160
+    assert result.written == 160
+    assert (
+        db.execute("SELECT count(*) FROM messages WHERE deleted_at IS NOT NULL").fetchone()[0]
+        == 0
+    )
+    assert db.execute("SELECT last_rescan_at FROM sync_state").fetchone()[0] == 1700002000
+
+
+@pytest.mark.asyncio
+async def test_rescan_empty_remote_does_not_mass_delete(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    first = SyncEngine(db, FakeClient([msg(1), msg(2)]), now=lambda: 1700001000)
+    first.register_peer(peer)
+    await first.incremental(peer)
+
+    empty_rescan = SyncEngine(db, FakeClient([]), now=lambda: 1700005000)
+    result = await empty_rescan.rescan(peer)
+
+    assert result.fetched == 0
+    assert result.written == 0
+    assert (
+        db.execute("SELECT count(*) FROM messages WHERE deleted_at IS NOT NULL").fetchone()[0]
+        == 0
+    )
+    assert db.execute("SELECT last_rescan_at FROM sync_state").fetchone()[0] == 1700005000
+
+
+@pytest.mark.asyncio
+async def test_rescan_dry_run_does_not_touch_state(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    first = SyncEngine(db, FakeClient([msg(1, "old")]), now=lambda: 1700001000)
+    first.register_peer(peer)
+    await first.incremental(peer)
+
+    dry = SyncEngine(db, FakeClient([msg(1, "new")]), now=lambda: 1700005000)
+    result = await dry.rescan(peer, dry_run=True)
+
+    assert result.fetched == 1
+    assert db.execute("SELECT text FROM messages WHERE msg_id=1").fetchone()[0] == "old"
+    assert db.execute("SELECT last_rescan_at FROM sync_state").fetchone()[0] is None
+
+
+@pytest.mark.asyncio
+async def test_rescan_is_throttled_per_peer(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    client = FakeClient([msg(1), msg(2)])
+    engine = SyncEngine(db, client, now=lambda: 1700001000)
+    engine.register_peer(peer)
+    await engine.incremental(peer)
+
+    first_rescan = SyncEngine(db, client, now=lambda: 1700005000)
+    assert (await first_rescan.rescan(peer, interval=3600)).fetched == 2
+
+    soon_after = SyncEngine(db, client, now=lambda: 1700005100)
+    skipped = await soon_after.rescan(peer, interval=3600)
+    assert skipped.fetched == 0
+    assert skipped.written == 0
+    assert db.execute("SELECT last_rescan_at FROM sync_state").fetchone()[0] == 1700005000
+
+    once_due = SyncEngine(db, client, now=lambda: 1700005000 + 3601)
+    due = await once_due.rescan(peer, interval=3600)
+    assert due.fetched == 2
+
+
+@pytest.mark.asyncio
+async def test_rescan_skips_peer_in_cooldown(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    engine = SyncEngine(db, FakeClient([msg(1)]), now=lambda: 1700001000)
+    engine.register_peer(peer)
+    engine.record_flood_wait(peer.peer_id, 3600)
+
+    result = await engine.rescan(peer)
+    assert result.fetched == 0
+    assert result.written == 0
+    assert db.execute("SELECT last_rescan_at FROM sync_state").fetchone()[0] is None
+
+
+@pytest.mark.asyncio
 async def test_rules_and_flood_wait_are_persisted(db: sqlite3.Connection) -> None:
     peer = Peer(1, "work", "group", "Work")
     engine = SyncEngine(

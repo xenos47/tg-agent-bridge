@@ -10,8 +10,8 @@ def test_pragmas_and_migrations_are_idempotent(db: sqlite3.Connection) -> None:
     assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
     assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert migrate(db) == 1
-    assert migrate(db) == 1
+    assert migrate(db) == 2
+    assert migrate(db) == 2
 
 
 def test_message_identity_is_composite(db: sqlite3.Connection) -> None:
