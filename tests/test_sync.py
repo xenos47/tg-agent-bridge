@@ -434,6 +434,90 @@ async def test_prune_hard_deletes_old_messages_tags_and_fts(db: sqlite3.Connecti
     assert engine.prune(Peer(1, "jobs", "channel", "Jobs")) == 0  # no retention
 
 
+class CountingClient(FakeClient):
+    def __init__(self, messages: list[Message]) -> None:
+        super().__init__(messages)
+        self.calls = 0
+
+    def iter_messages(self, peer_id: int, **kwargs: object) -> AsyncIterator[Message]:
+        self.calls += 1
+        return super().iter_messages(peer_id, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_call_telegram_during_cooldown(db: sqlite3.Connection) -> None:
+    peer = Peer(1, "work", "group", "Work")
+    client = CountingClient([msg(i) for i in range(1, 400)])
+    engine = SyncEngine(db, client, now=lambda: 1700001000)
+    engine.register_peer(peer)
+    await engine.incremental(peer)
+    engine.record_flood_wait(1, 3600)
+    client.calls = 0
+    later = SyncEngine(db, client, now=lambda: 1700001500)
+    await later.incremental(peer)
+    assert (await later.backfill(peer)).fetched == 0
+    assert client.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_lagging_incremental_cursor_resumes_from_top_of_mirror(
+    db: sqlite3.Connection,
+) -> None:
+    """A mirror left by the old fresh-peer bug: cursor at the bottom, backfill at the top."""
+    peer = Peer(1, "work", "group", "Work")
+    client = CountingClient([msg(i) for i in range(1, 11)])
+    engine = SyncEngine(db, client, batch_size=3, now=lambda: 1700001000)
+    engine.register_peer(peer)
+    with db:
+        engine.upsert_many([msg(1), msg(2), msg(8), msg(9), msg(10)])
+        db.execute("UPDATE sync_state SET last_msg_id=2, backfill_cursor=8")
+    client.messages.append(msg(11))
+    result = await engine.incremental(peer)
+    assert (result.first_id, result.last_id) == (11, 11)
+    for _ in range(3):
+        await engine.backfill(peer)
+    assert ids(db) == list(range(1, 12))
+
+
+@pytest.mark.asyncio
+async def test_deepening_with_empty_mirror_refetches_from_newest(db: sqlite3.Connection) -> None:
+    """Messages dropped by the old cutoff sit above the stored cursor, so resuming
+    from that cursor would lose them; an empty mirror must restart at the top."""
+    dormant = [dated(i, 40 - i) for i in range(1, 6)]  # 39..35 days old, all past 14d
+    client = CountingClient(dormant)
+    shallow = Peer(1, "old", "channel", "Old", policy=SyncPolicy(history=14 * DAY))
+    engine = SyncEngine(db, client, batch_size=2, now=lambda: NOW)
+    engine.register_peer(shallow)
+    await engine.incremental(shallow)
+    assert ids(db) == []
+    assert db.execute("SELECT backfill_done FROM sync_state").fetchone()[0] == 1
+
+    deep = Peer(1, "old", "channel", "Old", policy=SyncPolicy(history=None))
+    for _ in range(4):
+        await engine.backfill(deep)
+    assert ids(db) == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_prune_dry_run_is_logged(
+    db: sqlite3.Connection, capsys: pytest.CaptureFixture[str]
+) -> None:
+    peer = Peer(1, "jobs", "channel", "Jobs", policy=SyncPolicy(None, 7 * DAY))
+    engine = SyncEngine(db, FakeClient(HISTORY), now=lambda: NOW)
+    engine.register_peer(peer)
+    await engine.incremental(peer)
+    configure_logging(verbose=True)
+    assert engine.prune(peer, dry_run=True) == 7
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert {
+        "level": "info",
+        "event": "peer_pruned",
+        "peer": "jobs",
+        "deleted": 7,
+        "result": "dry_run",
+    } in events
+
+
 def test_repeated_errors_persist_cooldown(db: sqlite3.Connection) -> None:
     peer = Peer(1, "work", "group", "Work")
     engine = SyncEngine(db, FakeClient([]), now=lambda: 1700001000)

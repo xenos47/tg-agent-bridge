@@ -96,8 +96,14 @@ class SyncEngine:
             return await self._start(peer, state, dry_run=dry_run)
         if self._cooling_down(state):
             return SyncResult(peer.peer_id, "incremental", 0, 0)
+        # Backfill starts at the newest message and walks down, so everything
+        # below the top of the mirror is its job. Resuming from the highest
+        # mirrored id keeps a lagging cursor from crawling up through history.
+        top = self.connection.execute(
+            "SELECT max(msg_id) FROM messages WHERE peer_id=?", (peer.peer_id,)
+        ).fetchone()[0]
         messages = await self._collect(
-            peer.peer_id, min_id=int(state["last_msg_id"]), reverse=True
+            peer.peer_id, min_id=max(int(state["last_msg_id"]), int(top or 0)), reverse=True
         )
         return self._persist(peer.peer_id, messages, "incremental", dry_run=dry_run)
 
@@ -153,11 +159,16 @@ class SyncEngine:
         if state is None:
             messages = await self._collect(peer.peer_id, limit=self.batch_size)
             return self._result(peer.peer_id, "backfill", self._within_history(messages, cutoff), 0)
+        cooldown = state["cooldown_until"]
+        if cooldown is not None and int(cooldown) > self.now():
+            return SyncResult(peer.peer_id, "backfill", 0, 0)
         if int(state["backfill_done"]):
             if not self._history_deepened(state, cutoff):
                 return SyncResult(peer.peer_id, "backfill", 0, 0)
             # Resume below the oldest message still mirrored: retention may have
-            # removed rows above the old cursor, and they must be refetched.
+            # removed rows above the old cursor, and they must be refetched. With
+            # nothing mirrored (every fetched message was past the cutoff, or all
+            # were pruned) that means starting again from the newest message.
             offset = self.connection.execute(
                 "SELECT min(msg_id) FROM messages WHERE peer_id=?", (peer.peer_id,)
             ).fetchone()[0]
@@ -207,17 +218,26 @@ class SyncEngine:
             return 0
         cutoff = self.now() - peer.policy.retention
         if dry_run:
-            count = self.connection.execute(
-                "SELECT count(*) FROM messages WHERE peer_id=? AND ts<?",
-                (peer.peer_id, cutoff),
-            ).fetchone()[0]
-            return int(count)
-        with transaction(self.connection):
-            deleted = self.connection.execute(
-                "DELETE FROM messages WHERE peer_id=? AND ts<?", (peer.peer_id, cutoff)
-            ).rowcount
-        if deleted:
-            event(_LOG, 20, "peer_pruned", peer=peer.slug, deleted=deleted)
+            deleted = int(
+                self.connection.execute(
+                    "SELECT count(*) FROM messages WHERE peer_id=? AND ts<?",
+                    (peer.peer_id, cutoff),
+                ).fetchone()[0]
+            )
+        else:
+            with transaction(self.connection):
+                deleted = self.connection.execute(
+                    "DELETE FROM messages WHERE peer_id=? AND ts<?", (peer.peer_id, cutoff)
+                ).rowcount
+        if deleted or dry_run:
+            event(
+                _LOG,
+                20,
+                "peer_pruned",
+                peer=peer.slug,
+                deleted=deleted,
+                result="dry_run" if dry_run else "applied",
+            )
         return deleted
 
     def _history_cutoff(self, peer: Peer) -> int | None:
@@ -226,8 +246,8 @@ class SyncEngine:
 
     @staticmethod
     def _within_history(messages: Sequence[Message], cutoff: int | None) -> list[Message]:
-        # Backfill and the first fetch read newest-first, so everything after the
-        # first message older than the cutoff is older too.
+        # Callers read newest-first, so if anything was dropped the batch has
+        # crossed the cutoff and backfill is done.
         if cutoff is None:
             return list(messages)
         return [message for message in messages if message.ts >= cutoff]

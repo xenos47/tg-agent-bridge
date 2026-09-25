@@ -109,7 +109,8 @@ def test_watchlist_without_policies_uses_shallow_default_without_retention(
         ("policies: {p: {history: 14 days}}", "duration like 14d"),
         ("policies: {p: {history: 0d}}", "duration like 14d"),
         ("policies: {p: {history: 14d, retention: 7d}}", "must not be shorter"),
-        ("policies: {p: {history: all, retention: 7d}}", "must not be shorter"),
+        ("policies: {p: {history: all, retention: 7d}}", "cannot be combined with history: all"),
+        ("policies: {p: {history: 7d}}\ndefault_policy: [p]", "unknown policy"),
         ("default_policy: missing", "unknown policy 'missing'"),
         (
             "peers:\n  - {slug: jobs, id: 1, kind: channel, policy: missing}",

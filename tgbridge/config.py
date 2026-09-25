@@ -133,7 +133,12 @@ def _policy(name: str, raw: Any) -> SyncPolicy:
     if retention is None:
         return SyncPolicy(history=history)
     retention_seconds = _duration(retention, f"{label}.retention")
-    if history is None or retention_seconds < history:
+    if history is None:
+        raise ValueError(
+            f"{label}: retention cannot be combined with history: all; "
+            "set history to a duration no longer than retention"
+        )
+    if retention_seconds < history:
         raise ValueError(
             f"{label}.retention must not be shorter than history; "
             "otherwise backfilled messages are deleted again on every sync"
@@ -149,7 +154,7 @@ def _policies(raw: Mapping[str, Any]) -> tuple[dict[str, SyncPolicy], SyncPolicy
     default_name = raw.get("default_policy")
     if default_name is None:
         return policies, DEFAULT_POLICY
-    if default_name not in policies:
+    if not isinstance(default_name, str) or default_name not in policies:
         raise ValueError(f"default_policy refers to unknown policy {default_name!r}")
     return policies, policies[default_name]
 
@@ -160,7 +165,7 @@ def _peer_policy(
     name = item.get("policy")
     if name is None:
         return default
-    if name not in policies:
+    if not isinstance(name, str) or name not in policies:
         raise ValueError(f"peer {item.get('slug')!r} refers to unknown policy {name!r}")
     return policies[name]
 

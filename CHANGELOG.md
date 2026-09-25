@@ -25,7 +25,12 @@
   days instead of the whole history and never prune. Adds migration `003`
   (`sync_state.backfill_cutoff_ts`).
 - Fix a fresh peer starting incremental sync from its oldest message, which
-  delayed new messages until the cursor crawled through the whole history.
+  delayed new messages until the cursor crawled through the whole history. A
+  cursor already lagging below the top of the mirror now resumes from the top.
+- Backfill no longer calls Telegram while a peer is in FloodWait/error cooldown.
+- Write commands under `--dry-run` run against a migrated in-memory copy of the
+  database, so a preview never migrates or writes the file, and works on a
+  database with an older schema.
 
 ## 0.1.0 — 2026-09-16
 
