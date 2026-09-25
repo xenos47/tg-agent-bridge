@@ -28,8 +28,12 @@ def message(
     text: str = "hello",
     sender_name: str = "Lena",
     reply_to: int | None = None,
+    entities: list[dict[str, object]] | None = None,
 ) -> None:
-    raw = json.dumps({"id": msg_id, "message": text})
+    raw_data: dict[str, object] = {"id": msg_id, "message": text}
+    if entities is not None:
+        raw_data["entities"] = entities
+    raw = json.dumps(raw_data, ensure_ascii=False)
     db.execute(
         """
         INSERT INTO messages(

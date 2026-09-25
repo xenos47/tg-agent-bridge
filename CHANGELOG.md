@@ -2,6 +2,11 @@
 
 ## 0.1.1 — Unreleased
 
+- Add `--full` to `search`, `thread`, `tail` and `digest`: the text is not
+  truncated to the 400-character snippet, and each row gains a `links` field
+  (`[{"text", "url"}]`) read from the stored message entities — text links
+  and bare URLs, with Telegram's UTF-16 offsets. Output without the flag is
+  unchanged.
 - Allow an explicit MTProto port for restricted hosted environments.
 - Protect Telethon session files before the first network operation.
 - Add safe structured stderr diagnostics with `--verbose` and `--quiet`.

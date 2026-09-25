@@ -10,7 +10,7 @@ def render(
     *,
     output_format: str,
     max_tokens: int | None = None,
-    snippet_chars: int = 400,
+    snippet_chars: int | None = 400,
     format_version: int = 1,
 ) -> str:
     total = len(rows)
@@ -31,9 +31,9 @@ def render(
     return result
 
 
-def _truncate_text(row: dict[str, Any], limit: int) -> dict[str, Any]:
+def _truncate_text(row: dict[str, Any], limit: int | None) -> dict[str, Any]:
     text = row.get("text")
-    if isinstance(text, str) and len(text) > limit:
+    if limit is not None and isinstance(text, str) and len(text) > limit:
         row["text"] = text[: max(0, limit - 1)] + "…"
     return row
 
@@ -57,7 +57,9 @@ def _render_rows(rows: Sequence[dict[str, Any]], output_format: str) -> str:
             tag_text = f" [{', '.join(tags)}]" if tags else ""
             text = str(row.get("text", "")).replace("\n", " ")
             sender = row.get("from") or "unknown"
-            lines.append(f"- `{row.get('id', '')}` {sender}{tag_text} — {text}")
+            urls = " ".join(link["url"] for link in row.get("links") or [])
+            link_text = f" — links: {urls}" if urls else ""
+            lines.append(f"- `{row.get('id', '')}` {sender}{tag_text} — {text}{link_text}")
         return "\n".join(lines) + ("\n" if lines else "")
     if output_format == "table":
         if not rows:
@@ -112,5 +114,8 @@ def _cell(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, list):
-        return ",".join(str(item) for item in value)
+        return ",".join(
+            str(item["url"]) if isinstance(item, dict) and "url" in item else str(item)
+            for item in value
+        )
     return str(value).replace("\n", " ")

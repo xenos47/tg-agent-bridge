@@ -48,16 +48,20 @@ def _parser() -> argparse.ArgumentParser:
 
     search = sub.add_parser("search")
     _output_args(search)
+    _full_arg(search)
     _search_args(search)
     thread_parser = sub.add_parser("thread")
     _output_args(thread_parser)
+    _full_arg(thread_parser)
     thread_parser.add_argument("handle")
     tail = sub.add_parser("tail")
     _output_args(tail)
+    _full_arg(tail)
     tail.add_argument("--peer", required=True)
     tail.add_argument("--limit", type=int, default=50)
     digest = sub.add_parser("digest")
     _output_args(digest)
+    _full_arg(digest)
     digest.add_argument("--since", required=True)
     digest.add_argument("--limit", type=int, default=200)
     peer_parser = sub.add_parser("peers")
@@ -120,6 +124,14 @@ def _output_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--max-tokens", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--format-version", type=int, default=argparse.SUPPRESS)
+
+
+def _full_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="untruncated text plus a `links` field extracted from message entities",
+    )
 
 
 def _search_args(parser: argparse.ArgumentParser) -> None:
@@ -278,6 +290,7 @@ def _run(args: argparse.Namespace) -> int:
             rows,
             output_format=args.format,
             max_tokens=args.max_tokens,
+            snippet_chars=None if getattr(args, "full", False) else 400,
             format_version=args.format_version,
         )
         sys.stdout.write(output)
@@ -303,13 +316,14 @@ def _dispatch(
             replies_to=args.replies_to,
             limit=args.limit,
             order=args.order,
+            full=args.full,
         )
     if args.command == "thread":
-        return thread(connection, args.handle)
+        return thread(connection, args.handle, full=args.full)
     if args.command == "tail":
-        return search_messages(connection, peers=args.peer, limit=args.limit)
+        return search_messages(connection, peers=args.peer, limit=args.limit, full=args.full)
     if args.command == "digest":
-        return search_messages(connection, since=args.since, limit=args.limit)
+        return search_messages(connection, since=args.since, limit=args.limit, full=args.full)
     if args.command == "peers":
         return peers(connection)
     if args.command == "doctor":

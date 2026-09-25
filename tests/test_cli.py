@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import pytest
 from tests.factories import message, peer
 from tgbridge.cli.formatting import render
 from tgbridge.cli.main import _apply_user_settings, _parser, main
-from tgbridge.cli.query import search_messages
+from tgbridge.cli.query import search_messages, thread
 from tgbridge.config import Config
 from tgbridge.db import connect, migrate
 from tgbridge.sync.models import Peer
@@ -579,3 +580,81 @@ def test_sync_dry_run_uses_migrated_copy_and_leaves_old_database_untouched(
     check = connect(path)
     assert check.execute("PRAGMA user_version").fetchone()[0] == 1
     check.close()
+
+
+def test_full_adds_links_with_utf16_offsets(db: sqlite3.Connection) -> None:
+    peer(db)
+    # 🚀 is one Python character but two UTF-16 code units, as Telegram counts them.
+    text = "🚀 Digest\nSenior SRE / Acme\nsee https://example.org/jobs"
+    entities = [
+        {"_": "MessageEntityBold", "offset": 3, "length": 6},
+        {"_": "MessageEntityTextUrl", "offset": 10, "length": 17, "url": "https://acme.test/sre"},
+        {"_": "MessageEntityUrl", "offset": 32, "length": 24},
+    ]
+    message(db, text=text, entities=entities)
+
+    [row] = search_messages(db, full=True)
+
+    assert row["links"] == [
+        {"text": "Senior SRE / Acme", "url": "https://acme.test/sre"},
+        {"text": "https://example.org/jobs", "url": "https://example.org/jobs"},
+    ]
+
+
+def test_links_tolerate_missing_or_malformed_entities(db: sqlite3.Connection) -> None:
+    peer(db)
+    message(db, msg_id=1)
+    message(db, msg_id=2, entities=[{"_": "MessageEntityTextUrl", "offset": "x"}])
+    message(db, msg_id=3, entities=[{"_": "MessageEntityUrl", "offset": -1, "length": 3}])
+    message(db, msg_id=4, entities=[{"_": "MessageEntityUrl", "offset": 3, "length": 5}])
+    message(db, msg_id=5, entities=[{"_": "MessageEntityUrl", "offset": 1, "length": -1}])
+
+    rows = search_messages(db, full=True)
+
+    assert [row["links"] for row in rows] == [[], [], [], [], []]
+
+
+def test_default_output_has_no_links(db: sqlite3.Connection) -> None:
+    peer(db)
+    message(db, entities=[{"_": "MessageEntityUrl", "offset": 0, "length": 5}])
+
+    [row] = search_messages(db)
+
+    assert "links" not in row
+
+
+def test_raw_json_selected_only_with_full(db: sqlite3.Connection) -> None:
+    peer(db)
+    message(db)
+    statements: list[str] = []
+    db.set_trace_callback(statements.append)
+
+    search_messages(db)
+    thread(db, "work-chat#1")
+    assert not any("raw_json" in sql for sql in statements)
+
+    search_messages(db, full=True)
+    thread(db, "work-chat#1", full=True)
+    assert sum("raw_json" in sql for sql in statements) == 2
+
+
+def test_full_flag_disables_truncation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "full.sqlite"
+    connection = connect(database)
+    migrate(connection)
+    peer(connection)
+    message(connection, text="x" * 1000)
+    connection.close()
+
+    assert main(["--db", str(database), "search"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["text"]) == 400
+
+    assert main(["--db", str(database), "search", "--full"]) == 0
+    row = json.loads(capsys.readouterr().out)
+    assert len(row["text"]) == 1000
+    assert row["links"] == []
+
+    assert main(["--db", str(database), "thread", "work-chat#1", "--full"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["text"]) == 1000
