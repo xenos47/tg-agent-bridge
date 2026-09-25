@@ -85,7 +85,7 @@ def search_messages(
     params.append(limit)
     sql = f"""
         SELECT m.peer_id, m.msg_id, m.ts, m.sender_name, m.text, m.reply_to,
-               m.media_kind, m.raw_json, p.slug,
+               m.media_kind{_raw_json_column(full)}, p.slug,
                COALESCE(group_concat(DISTINCT all_tags.tag), '') AS tags
         FROM messages m
         JOIN peers p ON p.peer_id=m.peer_id
@@ -108,7 +108,7 @@ def thread(
         raise ValueError("handle must be slug#msg_id")
     msg_id = int(raw_id)
     rows = connection.execute(
-        """
+        f"""
         WITH RECURSIVE ancestors(peer_id, msg_id, reply_to, depth) AS (
             SELECT m.peer_id, m.msg_id, m.reply_to, 0
             FROM messages m JOIN peers p ON p.peer_id=m.peer_id
@@ -120,7 +120,7 @@ def thread(
             WHERE a.depth < 50
         )
         SELECT m.peer_id, m.msg_id, m.ts, m.sender_name, m.text, m.reply_to,
-               m.media_kind, m.raw_json, p.slug,
+               m.media_kind{_raw_json_column(full)}, p.slug,
                COALESCE(group_concat(DISTINCT t.tag), '') AS tags
         FROM messages m JOIN peers p ON p.peer_id=m.peer_id
         LEFT JOIN tags t ON t.peer_id=m.peer_id AND t.msg_id=m.msg_id
@@ -204,6 +204,11 @@ def doctor(connection: sqlite3.Connection, *, now: int | None = None) -> list[di
     return checks
 
 
+def _raw_json_column(full: bool) -> str:
+    # raw_json is the heaviest column (the full message object); only --full needs it.
+    return ", m.raw_json" if full else ""
+
+
 def _message_dict(row: sqlite3.Row, *, full: bool = False) -> dict[str, Any]:
     tags = sorted(filter(None, str(row["tags"]).split(",")))
     result = {
@@ -242,6 +247,8 @@ def message_links(text: str, raw_json: str | None) -> list[dict[str, str]]:
         try:
             start, length = int(entity["offset"]) * 2, int(entity["length"]) * 2
         except (KeyError, TypeError, ValueError):
+            continue
+        if start < 0 or length < 0 or start + length > len(encoded):
             continue
         label = encoded[start : start + length].decode("utf-16-le", errors="replace")
         url = entity.get("url") or label

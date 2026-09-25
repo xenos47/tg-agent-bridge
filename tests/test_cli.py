@@ -7,7 +7,7 @@ import pytest
 from tests.factories import message, peer
 from tgbridge.cli.formatting import render
 from tgbridge.cli.main import _apply_user_settings, _parser, main
-from tgbridge.cli.query import search_messages
+from tgbridge.cli.query import search_messages, thread
 from tgbridge.config import Config
 from tgbridge.db import connect, migrate
 from tgbridge.sync.models import Peer
@@ -605,10 +605,13 @@ def test_links_tolerate_missing_or_malformed_entities(db: sqlite3.Connection) ->
     peer(db)
     message(db, msg_id=1)
     message(db, msg_id=2, entities=[{"_": "MessageEntityTextUrl", "offset": "x"}])
+    message(db, msg_id=3, entities=[{"_": "MessageEntityUrl", "offset": -1, "length": 3}])
+    message(db, msg_id=4, entities=[{"_": "MessageEntityUrl", "offset": 3, "length": 5}])
+    message(db, msg_id=5, entities=[{"_": "MessageEntityUrl", "offset": 1, "length": -1}])
 
     rows = search_messages(db, full=True)
 
-    assert [row["links"] for row in rows] == [[], []]
+    assert [row["links"] for row in rows] == [[], [], [], [], []]
 
 
 def test_default_output_has_no_links(db: sqlite3.Connection) -> None:
@@ -618,6 +621,21 @@ def test_default_output_has_no_links(db: sqlite3.Connection) -> None:
     [row] = search_messages(db)
 
     assert "links" not in row
+
+
+def test_raw_json_selected_only_with_full(db: sqlite3.Connection) -> None:
+    peer(db)
+    message(db)
+    statements: list[str] = []
+    db.set_trace_callback(statements.append)
+
+    search_messages(db)
+    thread(db, "work-chat#1")
+    assert not any("raw_json" in sql for sql in statements)
+
+    search_messages(db, full=True)
+    thread(db, "work-chat#1", full=True)
+    assert sum("raw_json" in sql for sql in statements) == 2
 
 
 def test_full_flag_disables_truncation(
