@@ -5,6 +5,14 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class SyncPolicy:
+    """How much of a peer's history to mirror, in seconds; None means unbounded."""
+
+    history: int | None = None
+    retention: int | None = None
+
+
+@dataclass(frozen=True)
 class Peer:
     peer_id: int
     slug: str
@@ -13,6 +21,7 @@ class Peer:
     username: str | None = None
     sendable: bool = False
     priority: int = 0
+    policy: SyncPolicy = field(default_factory=SyncPolicy)
 
 
 @dataclass(frozen=True)

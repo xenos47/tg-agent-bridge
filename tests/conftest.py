@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,6 +22,14 @@ def isolate_tgq_path_settings(
         "TGQ_SYNC_INTERVAL",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def reset_project_logger() -> Iterator[None]:
+    """configure_logging() binds to the current stderr; drop it so later tests
+    never write to a capsys stream that pytest has already closed."""
+    yield
+    logging.getLogger("tgbridge").handlers.clear()
 
 
 @pytest.fixture

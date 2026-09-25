@@ -546,3 +546,36 @@ def test_sync_loop_uses_configured_interval(
         "session": str(tmp_path / "tgq.session"),
         "interval": 180,
     }
+
+
+def test_sync_dry_run_uses_migrated_copy_and_leaves_old_database_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "old.sqlite"
+    old = connect(path)
+    old.executescript(
+        (Path(__file__).parents[1] / "tgbridge/db/migrations/001_init.sql").read_text()
+        + "PRAGMA user_version=1;"
+    )
+    old.close()
+    watchlist = tmp_path / "watchlist.yaml"
+    watchlist.write_text("peers: []\n")
+    seen: list[str] = []
+
+    async def fake_sync(
+        connection: sqlite3.Connection, config: Config, *, session: str, dry_run: bool
+    ) -> int:
+        del config, session
+        assert dry_run
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(sync_state)")}
+        seen.extend(sorted(columns & {"last_rescan_at", "backfill_cutoff_ts"}))
+        connection.execute("UPDATE sync_state SET error_count=1")  # must not reach disk
+        return 0
+
+    monkeypatch.setattr("tgbridge.sync.runtime.run_sync", fake_sync)
+    args = ["--db", str(path), "--config", str(watchlist), "sync", "--dry-run"]
+    assert main(args) == 0
+    assert seen == ["backfill_cutoff_ts", "last_rescan_at"]
+    check = connect(path)
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 1
+    check.close()

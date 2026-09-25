@@ -5,6 +5,19 @@ rate_limits:
   peer_per_hour: 5
   minimum_gap_seconds: 30
 
+# Named sync policies. `history`: how far back to backfill (`14d`, `8w` or `all`).
+# `retention` (optional): hard-delete mirrored messages older than this on every
+# sync; it must not be shorter than `history`. Without `default_policy`, peers
+# get `history: 14d` and no retention.
+policies:
+  fresh:
+    history: 14d
+    retention: 14d
+  archive:
+    history: all
+
+default_policy: fresh
+
 peers:
   - slug: work-chat
     id: -1001234567890
@@ -12,6 +25,7 @@ peers:
     title: Work chat
     sendable: false
     priority: 10
+    policy: archive
   - slug: lena
     id: 987654321
     kind: user

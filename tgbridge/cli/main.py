@@ -239,6 +239,22 @@ def _log_cli_error(error: Exception, exit_code: int) -> None:
     )
 
 
+def _dry_run_copy(path: Path) -> sqlite3.Connection:
+    """In-memory, migrated copy of the mirror for write commands under --dry-run.
+
+    Keeps the file untouched (no migrations, no error bookkeeping) while the
+    command still sees the current schema.
+    """
+    copy = connect(":memory:")
+    if path.exists():
+        source = connect(path)
+        try:
+            source.backup(copy)
+        finally:
+            source.close()
+    return copy
+
+
 def _run(args: argparse.Namespace) -> int:
     if args.command == "watchlist":
         return _run_watchlist(args)
@@ -248,10 +264,10 @@ def _run(args: argparse.Namespace) -> int:
     write_command = args.command in {"sync", "send", "outbox", "tag", "retag"}
     if not path.exists() and not write_command:
         raise DatabaseError(f"database does not exist: {path}")
-    transient = bool(args.dry_run and not path.exists())
-    connection = connect(":memory:" if transient else path)
+    transient = bool(args.dry_run and write_command)
+    connection = _dry_run_copy(path) if transient else connect(path)
     try:
-        if transient or (write_command and not args.dry_run):
+        if transient or write_command:
             migrate(connection)
         elif int(connection.execute("PRAGMA user_version").fetchone()[0]) < 1:
             raise DatabaseError("database migrations have not been applied")
