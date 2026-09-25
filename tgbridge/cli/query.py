@@ -1,5 +1,6 @@
 """Read-only SQL queries for agent-facing commands."""
 
+import json
 import re
 import sqlite3
 import time
@@ -35,6 +36,7 @@ def search_messages(
     replies_to: int | None = None,
     limit: int = 50,
     order: str = "desc",
+    full: bool = False,
 ) -> list[dict[str, Any]]:
     joins: list[str] = []
     where = ["p.watched=1", "m.deleted_at IS NULL"]
@@ -83,7 +85,7 @@ def search_messages(
     params.append(limit)
     sql = f"""
         SELECT m.peer_id, m.msg_id, m.ts, m.sender_name, m.text, m.reply_to,
-               m.media_kind, p.slug,
+               m.media_kind, m.raw_json, p.slug,
                COALESCE(group_concat(DISTINCT all_tags.tag), '') AS tags
         FROM messages m
         JOIN peers p ON p.peer_id=m.peer_id
@@ -95,10 +97,12 @@ def search_messages(
         ORDER BY m.ts {direction}, m.peer_id {direction}, m.msg_id {direction}
         LIMIT ?
     """
-    return [_message_dict(row) for row in connection.execute(sql, params)]
+    return [_message_dict(row, full=full) for row in connection.execute(sql, params)]
 
 
-def thread(connection: sqlite3.Connection, handle: str) -> list[dict[str, Any]]:
+def thread(
+    connection: sqlite3.Connection, handle: str, *, full: bool = False
+) -> list[dict[str, Any]]:
     slug, separator, raw_id = handle.rpartition("#")
     if not separator or not raw_id.isdigit():
         raise ValueError("handle must be slug#msg_id")
@@ -116,7 +120,7 @@ def thread(connection: sqlite3.Connection, handle: str) -> list[dict[str, Any]]:
             WHERE a.depth < 50
         )
         SELECT m.peer_id, m.msg_id, m.ts, m.sender_name, m.text, m.reply_to,
-               m.media_kind, p.slug,
+               m.media_kind, m.raw_json, p.slug,
                COALESCE(group_concat(DISTINCT t.tag), '') AS tags
         FROM messages m JOIN peers p ON p.peer_id=m.peer_id
         LEFT JOIN tags t ON t.peer_id=m.peer_id AND t.msg_id=m.msg_id
@@ -127,7 +131,7 @@ def thread(connection: sqlite3.Connection, handle: str) -> list[dict[str, Any]]:
         """,
         (slug, msg_id, slug, msg_id),
     )
-    return [_message_dict(row) for row in rows]
+    return [_message_dict(row, full=full) for row in rows]
 
 
 def peers(connection: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -200,9 +204,9 @@ def doctor(connection: sqlite3.Connection, *, now: int | None = None) -> list[di
     return checks
 
 
-def _message_dict(row: sqlite3.Row) -> dict[str, Any]:
+def _message_dict(row: sqlite3.Row, *, full: bool = False) -> dict[str, Any]:
     tags = sorted(filter(None, str(row["tags"]).split(",")))
-    return {
+    result = {
         "id": f"{row['slug']}#{row['msg_id']}",
         "peer": row["slug"],
         "ts": row["ts"],
@@ -212,3 +216,35 @@ def _message_dict(row: sqlite3.Row) -> dict[str, Any]:
         "reply_to": row["reply_to"],
         "media": row["media_kind"],
     }
+    if full:
+        result["links"] = message_links(row["text"], row["raw_json"])
+    return result
+
+
+_LINK_ENTITIES = {"MessageEntityTextUrl", "MessageEntityUrl"}
+
+
+def message_links(text: str, raw_json: str | None) -> list[dict[str, str]]:
+    """Links from the message entities stored in `raw_json`, in message order.
+
+    Telegram offsets and lengths count UTF-16 code units, not Python characters,
+    so an astral emoji before a link would shift a naive slice.
+    """
+    try:
+        entities = json.loads(raw_json or "{}").get("entities") or []
+    except (ValueError, AttributeError):
+        return []
+    encoded = text.encode("utf-16-le")
+    links: list[dict[str, str]] = []
+    for entity in entities:
+        if not isinstance(entity, dict) or entity.get("_") not in _LINK_ENTITIES:
+            continue
+        try:
+            start, length = int(entity["offset"]) * 2, int(entity["length"]) * 2
+        except (KeyError, TypeError, ValueError):
+            continue
+        label = encoded[start : start + length].decode("utf-16-le", errors="replace")
+        url = entity.get("url") or label
+        if url:
+            links.append({"text": label, "url": url})
+    return links

@@ -192,6 +192,10 @@ uv run tgq sync
 uv run tgq --format jsonl search --tag urgent --since 24h
 uv run tgq search --peer work-chat --q "release OR deploy" --limit 20
 
+# Whole message instead of a 400-char snippet, plus the links hidden behind
+# formatted text (Telegram entities), e.g. per-role links in a job digest
+uv run tgq --format jsonl thread work-chat#42 --full
+
 # Propose a send — writes outbox only; does not transmit
 uv run tgq send --peer lena --body "..."
 
