@@ -25,21 +25,17 @@ def parse_time(value: str, *, now: int | None = None) -> int:
 HANDLE_FORMAT = "slug#msg_id or account:slug#msg_id"
 
 
-def split_handle(handle: str) -> tuple[str | None, str, int]:
-    """Split `slug#msg_id` or `account:slug#msg_id` into (account, slug, msg_id).
+def split_handle(handle: str) -> tuple[str, int]:
+    """Split `slug#msg_id` or `account:slug#msg_id` at the last '#'.
 
-    Account names never contain ':', so the first one ends the account; a flat
-    (unnamed) setup may still have slugs with ':' and re-joins them itself.
+    Returns (body, msg_id). Whether a ':' in the body starts an account prefix
+    depends on the settings (flat setups keep slugs with ':'), so the caller
+    decides that.
     """
     body, separator, raw_id = handle.rpartition("#")
     if not separator or not raw_id.isdigit() or not body:
         raise ValueError(f"handle must be {HANDLE_FORMAT}")
-    account, colon, slug = body.partition(":")
-    if not colon:
-        return None, body, int(raw_id)
-    if not account or not slug:
-        raise ValueError(f"handle must be {HANDLE_FORMAT}")
-    return account, slug, int(raw_id)
+    return body, int(raw_id)
 
 
 def search_messages(

@@ -10,15 +10,20 @@
   unchanged. Writes other than `tag` with a qualified handle reject `all`;
   `sync --account all` runs accounts sequentially. Existing flat settings are
   the account `default`. Adds `contrib/systemd/tgq-sync@.{service,timer}`.
-- Named-account settings reject `TGQ_DB` / `TGQ_CONFIG` / `TGQ_SESSION`, and
-  accounts that share a database or a session directory.
+- Named-account settings reject `TGQ_DB` / `TGQ_CONFIG` / `TGQ_SESSION`
+  unless the matching CLI option overrides it or the command has no such
+  option, and reject accounts that share a database or a session directory.
+  An empty `TGQ_*` variable counts as unset.
   `TGQ_TELEGRAM_PORT` / `TGQ_SYNC_INTERVAL` override account settings just as
   they override flat ones. An account's own `secrets` file must exist and set
   both `TGQ_API_ID` and `TGQ_API_HASH`; it is not topped up from the
   environment.
 - Handles may be written as `account:slug#msg_id` everywhere a handle is
   accepted. With named accounts, watchlist peer slugs must not contain `:`;
-  flat settings keep accepting them.
+  flat settings keep accepting them and look a handle up as a whole slug
+  before dropping a `default:` prefix.
+- A watchlist peer or rule missing a required key is a usage error (exit 2)
+  naming the file, instead of a `KeyError`.
 - Add `--full` to `search`, `thread`, `tail` and `digest`: the text is not
   truncated to the 400-character snippet, and each row gains a `links` field
   (`[{"text", "url"}]`) read from the stored message entities — text links

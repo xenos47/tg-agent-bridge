@@ -182,6 +182,39 @@ def _slug(item: Mapping[str, Any], *, named_accounts: bool) -> str:
     return slug
 
 
+def _peers(
+    raw: Mapping[str, Any],
+    named_accounts: bool,
+    policies: Mapping[str, SyncPolicy],
+    default_policy: SyncPolicy,
+) -> tuple[Peer, ...]:
+    return tuple(
+        Peer(
+            peer_id=int(item["id"]),
+            slug=_slug(item, named_accounts=named_accounts),
+            kind=str(item["kind"]),
+            title=str(item.get("title", item["slug"])),
+            username=item.get("username"),
+            sendable=bool(item.get("sendable", False)),
+            priority=int(item.get("priority", 0)),
+            policy=_peer_policy(item, policies, default_policy),
+        )
+        for item in raw.get("peers") or []
+    )
+
+
+def _rules(raw: Mapping[str, Any]) -> tuple[TagRule, ...]:
+    return tuple(
+        TagRule(
+            rule_id=str(item["id"]),
+            tag=str(item["tag"]),
+            text_regex=item.get("match", {}).get("text_regex"),
+            sender_id=item.get("match", {}).get("sender_id"),
+        )
+        for item in raw.get("rules", [])
+    )
+
+
 def load_config(
     path: str | Path,
     *,
@@ -200,30 +233,16 @@ def load_config(
     selected_port = (
         telegram_port
         if telegram_port is not None
-        else environment.get("TGQ_TELEGRAM_PORT", configured_port)
+        # An empty export counts as unset, as in the CLI.
+        else (environment.get("TGQ_TELEGRAM_PORT") or "").strip() or configured_port
     )
-    peers = tuple(
-        Peer(
-            peer_id=int(item["id"]),
-            slug=_slug(item, named_accounts=named_accounts),
-            kind=str(item["kind"]),
-            title=str(item.get("title", item["slug"])),
-            username=item.get("username"),
-            sendable=bool(item.get("sendable", False)),
-            priority=int(item.get("priority", 0)),
-            policy=_peer_policy(item, policies, default_policy),
-        )
-        for item in raw.get("peers") or []
-    )
-    rules = tuple(
-        TagRule(
-            rule_id=str(item["id"]),
-            tag=str(item["tag"]),
-            text_regex=item.get("match", {}).get("text_regex"),
-            sender_id=item.get("match", {}).get("sender_id"),
-        )
-        for item in raw.get("rules", [])
-    )
+    try:
+        peers, rules = _peers(raw, named_accounts, policies, default_policy), _rules(raw)
+    except (KeyError, TypeError) as error:
+        # A missing key or a non-mapping entry is a usage error, not a crash.
+        raise ValueError(
+            f"watchlist {path}: malformed peer or rule entry ({type(error).__name__}: {error})"
+        ) from error
     limits = raw.get("rate_limits", {})
     return Config(
         peers=peers,

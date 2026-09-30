@@ -13,6 +13,7 @@ from typing import Any
 from tgbridge.cli.errors import DatabaseError, TgqError
 from tgbridge.cli.formatting import render
 from tgbridge.cli.query import (
+    HANDLE_FORMAT,
     doctor,
     peers,
     search_messages,
@@ -247,46 +248,61 @@ def _apply_account(
     environment: Mapping[str, str],
     settings: UserSettings,
 ) -> None:
-    paths_from_environment: Mapping[str, str] = environment
+    exported = {
+        variable: _environment_value(environment, variable)
+        for _, variable in _ACCOUNT_PATH_OPTIONS
+    }
     if settings.named:
         # One exported TGQ_DB would silently point every account at one mirror.
-        for _, variable in _ACCOUNT_PATH_OPTIONS:
-            if environment.get(variable) is not None:
+        # A variable the CLI option overrides, or the command lacks, is harmless.
+        for option, variable in _ACCOUNT_PATH_OPTIONS:
+            if (
+                exported[variable] is not None
+                and hasattr(args, option)
+                and getattr(args, option) is None
+            ):
                 raise ValueError(
                     f"{variable} cannot be used with an accounts section in settings; "
-                    "set the path under accounts.<name> or pass the CLI option"
+                    f"set the path under accounts.<name>, pass --{option}, "
+                    f"or unset {variable}"
                 )
-        paths_from_environment = {}
+        exported = dict.fromkeys(exported)
     args.account_name = account.name
     args.named = settings.named
     args.audit_account = account.name if settings.named else None
     args.secrets = None if account.secrets is None else str(account.secrets)
-    args.db = _select(args.db, paths_from_environment.get("TGQ_DB"), account.db, None)
+    args.db = _select(args.db, exported["TGQ_DB"], account.db, None)
     args.config = _select(
         args.config,
-        paths_from_environment.get("TGQ_CONFIG"),
+        exported["TGQ_CONFIG"],
         account.watchlist,
         "watchlist.yaml",
     )
     if hasattr(args, "session"):
         args.session = _select(
             args.session,
-            paths_from_environment.get("TGQ_SESSION"),
+            exported["TGQ_SESSION"],
             account.session,
             "tgq.session",
         )
     # One rule for flat and named settings alike: CLI, then the export, then
     # the file. The port is a property of the host's network, not the account.
     args.telegram_port = _select(
-        None, environment.get("TGQ_TELEGRAM_PORT"), account.telegram_port, None
+        None, _environment_value(environment, "TGQ_TELEGRAM_PORT"), account.telegram_port, None
     )
     if hasattr(args, "interval"):
         args.interval = _select_interval(
             args.interval,
-            environment.get("TGQ_SYNC_INTERVAL"),
+            _environment_value(environment, "TGQ_SYNC_INTERVAL"),
             account.sync_interval,
             60,
         )
+
+
+def _environment_value(environment: Mapping[str, str], variable: str) -> str | None:
+    """An exported TGQ_* value; empty counts as unset, as for TGQ_ACCOUNT."""
+    value = environment.get(variable)
+    return value if value is not None and value.strip() else None
 
 
 def _select(
@@ -390,16 +406,16 @@ def _run_fanout(args: argparse.Namespace) -> int:
             _check_query(args)
         return _collect_each(args)
     if args.command in {"thread", "tag"}:
-        account, _, _ = split_handle(args.handle)
-        if account is None:
-            raise ValueError(
-                f"--account all needs an account-qualified handle (account:slug#msg_id), "
-                f"got {args.handle!r}"
-            )
         if args.user_settings.named:
+            account, _, _ = _named_handle(args.handle)
+            if account is None:
+                raise ValueError(
+                    f"--account all needs an account-qualified handle (account:slug#msg_id), "
+                    f"got {args.handle!r}"
+                )
             target = args.targets[args.user_settings.account(account).name]
         else:
-            # Flat settings: the one account; a slug may itself contain ':'.
+            # Flat settings: `all` is the one account, so any handle routes there.
             (target,) = args.targets.values()
         rows = _collect(target)
         if args.command == "thread" and rows:
@@ -464,16 +480,20 @@ def _collect_each(args: argparse.Namespace) -> int:
 
     A failing account is logged with its name and skipped; the rest still run
     and print, and the first failure's exit code wins. An error without a
-    stable exit code (a malformed watchlist, say) counts as a Telegram/runtime
-    failure (4) rather than aborting the remaining accounts.
+    stable exit code is a bug, not an account failure: the other accounts
+    still run and print, then it is re-raised with its traceback.
     """
     results: list[tuple[argparse.Namespace, list[dict[str, Any]]]] = []
     failure = 0
+    unexpected: Exception | None = None
     for target in args.targets.values():
         try:
             rows = _collect(target)
         except Exception as error:
-            code = _exit_code(error) or 4
+            code = _exit_code(error)
+            if code is None:
+                unexpected = unexpected or error
+                continue
             _log_cli_error(error, code, account=target.account_name)
             failure = failure or code
             continue
@@ -481,6 +501,8 @@ def _collect_each(args: argparse.Namespace) -> int:
     merged = _merge(args, results)
     # Sync with nothing to report (every lock held) is a success, not "no rows".
     code = 0 if args.command == "sync" and not merged else _emit(merged, args)
+    if unexpected is not None:
+        raise unexpected
     return failure or code
 
 
@@ -529,7 +551,7 @@ def _dispatch(
             full=args.full,
         )
     if args.command == "thread":
-        return thread(connection, *_local_handle(args), full=args.full)
+        return thread(connection, *_local_handle(connection, args), full=args.full)
     if args.command == "tail":
         return search_messages(connection, peers=args.peer, limit=args.limit, full=args.full)
     if args.command == "digest":
@@ -656,29 +678,51 @@ def _outbox_command(
     raise ValueError(f"unknown outbox command: {args.outbox_command}")
 
 
-def _local_handle(args: argparse.Namespace) -> tuple[str, int]:
-    """(slug, msg_id) of the handle after checking any account prefix (D3 in #29)."""
-    account, slug, msg_id = split_handle(args.handle)
-    if account is not None and account != args.account_name:
-        if not args.named:
-            # Flat settings may keep slugs with ':' (`team:core#42`).
-            return f"{account}:{slug}", msg_id
-        raise ValueError(
-            f"handle {args.handle!r} belongs to account {account!r}, "
-            f"but the selected account is {args.account_name!r}"
-        )
-    return slug, msg_id
+def _named_handle(handle: str) -> tuple[str | None, str, int]:
+    """(account, slug, msg_id) under named accounts, whose slugs never contain ':'."""
+    body, msg_id = split_handle(handle)
+    account, colon, slug = body.partition(":")
+    if not colon:
+        return None, body, msg_id
+    if not account or not slug:
+        raise ValueError(f"handle must be {HANDLE_FORMAT}")
+    return account, slug, msg_id
+
+
+def _local_handle(connection: sqlite3.Connection, args: argparse.Namespace) -> tuple[str, int]:
+    """(slug, msg_id) of the handle in the selected account's mirror (D3 in #29)."""
+    if args.named:
+        account, slug, msg_id = _named_handle(args.handle)
+        if account is not None and account != args.account_name:
+            raise ValueError(
+                f"handle {args.handle!r} belongs to account {account!r}, "
+                f"but the selected account is {args.account_name!r}"
+            )
+        return slug, msg_id
+    # Flat settings keep slugs with ':' (`team:core#42`), so the whole body is
+    # tried as a slug first; otherwise a `default:` prefix, as `--account all`
+    # prints it, is dropped.
+    body, msg_id = split_handle(args.handle)
+    account, _, slug = body.partition(":")
+    if account == args.account_name and slug and _find_peer_id(connection, body) is None:
+        return slug, msg_id
+    return body, msg_id
+
+
+def _find_peer_id(connection: sqlite3.Connection, slug: str) -> int | None:
+    row = connection.execute("SELECT peer_id FROM peers WHERE slug=?", (slug,)).fetchone()
+    return None if row is None else int(row["peer_id"])
 
 
 def _peer_id(connection: sqlite3.Connection, slug: str) -> int:
-    row = connection.execute("SELECT peer_id FROM peers WHERE slug=?", (slug,)).fetchone()
-    if row is None:
+    peer_id = _find_peer_id(connection, slug)
+    if peer_id is None:
         raise ValueError(f"unknown peer: {slug}")
-    return int(row["peer_id"])
+    return peer_id
 
 
 def _tag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
-    slug, msg_id = _local_handle(args)
+    slug, msg_id = _local_handle(connection, args)
     peer_id = _peer_id(connection, slug)
     if args.dry_run:
         return [{"id": args.handle, "tag": args.tag, "removed": args.remove, "dry_run": True}]

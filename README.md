@@ -126,8 +126,11 @@ accounts:
   `cli_error` with its `account` and skipped; the others still print, and the
   exit code reports the failure. An error in the query itself (`--since`,
   `--q` syntax) is reported once, before any mirror is read.
-- Handle-taking commands accept both forms. Under `--account all`, `thread`
-  and `tag` need the qualified form and act on that one account.
+- Handle-taking commands accept both forms. With named accounts, `thread`
+  and `tag` under `--account all` need the qualified form and act on that one
+  account. With flat settings a handle is first looked up as a whole slug
+  (so `team:core#42` stays that peer), and only then is a `default:` prefix
+  dropped; `all` needs no prefix there.
 - Other writes (`send`, `outbox approve|reject|send`, `retag`,
   `watchlist resolve`) always target one account and reject `all`.
   `sync --account all` syncs the accounts one after another and keeps going
@@ -137,7 +140,10 @@ accounts:
   `--session` still override the one selected account and are rejected with
   `--account all`; the `TGQ_DB`, `TGQ_CONFIG` and `TGQ_SESSION` variables are
   rejected once an `accounts` section exists, so an exported path cannot
-  silently point every account at one mirror. With flat settings `all` is the
+  silently point every account at one mirror. A variable is only rejected
+  when it would apply: the matching CLI option overrides it, and a command
+  without that option (`search` has no `--session`) ignores it. Like
+  `TGQ_ACCOUNT=`, an empty `TGQ_*` variable counts as unset. With flat settings `all` is the
   one `default` account, so both the options and the variables apply to it.
 - `TGQ_TELEGRAM_PORT` and `TGQ_SYNC_INTERVAL` override every account's
   `telegram.port` / `sync.interval`, exactly as they override flat settings:

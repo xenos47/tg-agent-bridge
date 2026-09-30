@@ -301,14 +301,36 @@ def test_all_reads_survive_malformed_watchlist(
     accounts: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (tmp_path / "personal" / "watchlist.yaml").write_text("peers:\n  - {id: 1, kind: group}\n")
-    assert main(["--settings", str(accounts), "--account", "all", "outbox", "list"]) == 4
+    assert main(["--settings", str(accounts), "--account", "all", "outbox", "list"]) == 2
     captured = capsys.readouterr()
     [error] = _jsonl(captured.err)
     assert (error["account"], error["error_type"], error["exit_code"]) == (
         "personal",
-        "KeyError",
-        4,
+        "ValueError",
+        2,
     )
+    assert "malformed peer or rule entry" in str(error["error"])
+
+
+def test_all_reraises_unexpected_error_after_other_accounts(
+    accounts: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tgbridge.cli import main as cli
+
+    real_peers = cli.peers
+    seen: list[str] = []
+
+    def flaky_peers(connection: sqlite3.Connection) -> list[dict[str, object]]:
+        seen.append("call")
+        if len(seen) == 1:
+            raise AttributeError("bug")
+        return real_peers(connection)
+
+    monkeypatch.setattr(cli, "peers", flaky_peers)
+    with pytest.raises(AttributeError, match="bug"):
+        main(["--settings", str(accounts), "--account", "all", "peers"])
+    # The second account still ran and printed before the bug surfaced.
+    assert [row["account"] for row in _jsonl(capsys.readouterr().out)] == ["work"]
 
 
 @pytest.mark.parametrize(
@@ -329,16 +351,53 @@ def test_unknown_account_exits_two(accounts: Path, capsys: pytest.CaptureFixture
     assert "configured: personal, work" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("variable", ["TGQ_DB", "TGQ_CONFIG", "TGQ_SESSION"])
+@pytest.mark.parametrize(
+    ("variable", "command"),
+    [("TGQ_DB", ["search"]), ("TGQ_CONFIG", ["search"]), ("TGQ_SESSION", ["sync"])],
+)
 def test_path_environment_overrides_are_rejected_with_named_accounts(
     accounts: Path,
     variable: str,
+    command: list[str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv(variable, "/elsewhere")
-    assert main(["--settings", str(accounts), "search"]) == 2
+    assert main(["--settings", str(accounts), *command]) == 2
     assert f"{variable} cannot be used with an accounts section" in capsys.readouterr().err
+    assert main(["--settings", str(accounts), "--account", "all", *command]) == 2
+    assert f"{variable} cannot be used with an accounts section" in capsys.readouterr().err
+
+
+def test_path_environment_is_harmless_when_overridden_empty_or_unused(
+    accounts: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    other = tmp_path / "other.sqlite"
+    _mirror(other, [(7, "other", 1)])
+    prefix = ["--settings", str(accounts)]
+    monkeypatch.setenv("TGQ_DB", "/elsewhere")
+    # The CLI option wins, so the stale export does not matter.
+    assert main([*prefix, "--db", str(other), "search"]) == 0
+    assert _ids(capsys.readouterr().out) == ["work-chat#7"]
+    # Like TGQ_ACCOUNT, an empty export counts as unset.
+    monkeypatch.setenv("TGQ_DB", "")
+    assert main([*prefix, "search", "--limit", "1"]) == 0
+    assert _jsonl(capsys.readouterr().out)[0]["text"] == "personal two"
+    # Read commands have no session, so TGQ_SESSION cannot mislead them.
+    monkeypatch.setenv("TGQ_SESSION", "/elsewhere")
+    assert main([*prefix, "search", "--limit", "1"]) == 0
+    assert _jsonl(capsys.readouterr().out)[0]["text"] == "personal two"
+
+
+def test_empty_transport_environment_means_unset(tmp_path: Path) -> None:
+    settings = tmp_path / "config.yaml"
+    settings.write_text("telegram:\n  port: 443\nsync:\n  interval: 900\n")
+    args = _parser().parse_args(["--settings", str(settings), "sync"])
+    _apply_user_settings(args, environ={"TGQ_TELEGRAM_PORT": "", "TGQ_SYNC_INTERVAL": " "})
+    assert (args.telegram_port, args.interval) == (443, 900)
 
 
 def test_cli_path_option_overrides_selected_account_but_not_all(
@@ -419,8 +478,39 @@ def test_legacy_slugs_with_colon_keep_working(
     assert _ids(capsys.readouterr().out) == ["team:core#42"]
     assert main([*prefix, "--account", "all", "thread", "default:team:core#42"]) == 0
     assert _ids(capsys.readouterr().out) == ["default:team:core#42"]
+    # `all` is the one flat account, so an unqualified handle is fine too.
+    assert main([*prefix, "--account", "all", "thread", "team:core#42"]) == 0
+    assert _ids(capsys.readouterr().out) == ["default:team:core#42"]
     assert main([*prefix, "tag", "team:core#42", "todo"]) == 0
     assert main([*prefix, "retag"]) == 0
+
+
+@pytest.mark.parametrize("slug", ["default:ops", ":ops", "team:"])
+def test_flat_colon_slug_resolves_as_a_whole_first(
+    slug: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "messages.sqlite"
+    connection = connect(database)
+    migrate(connection)
+    peer(connection, peer_id=1, slug="ops")
+    peer(connection, peer_id=2, slug=slug)
+    message(connection, peer_id=1, msg_id=42, text="plain ops", ts=1)
+    message(connection, peer_id=2, msg_id=42, text="colon slug", ts=2)
+    connection.close()
+    settings = tmp_path / "config.yaml"
+    settings.write_text(f"paths:\n  db: {database}\n")
+    prefix = ["--settings", str(settings)]
+    assert main([*prefix, "thread", f"{slug}#42"]) == 0
+    assert [row["text"] for row in _jsonl(capsys.readouterr().out)] == ["colon slug"]
+    assert main([*prefix, "tag", f"{slug}#42", "todo"]) == 0
+    capsys.readouterr()
+    check = sqlite3.connect(database)
+    assert check.execute("SELECT peer_id, msg_id FROM tags").fetchall() == [(2, 42)]
+    check.close()
+    # The `default:` prefix that `--account all` prints still resolves.
+    assert main([*prefix, "thread", "default:ops#42"]) == 0
+    expected = "colon slug" if slug == "default:ops" else "plain ops"
+    assert [row["text"] for row in _jsonl(capsys.readouterr().out)] == [expected]
 
 def test_sync_all_runs_each_account_and_survives_one_failure(
     accounts: Path,
@@ -494,19 +584,27 @@ def test_single_account_sync_uses_account_session_and_secrets(
 @pytest.mark.parametrize(
     ("handle", "expected"),
     [
-        ("chat#5", (None, "chat", 5)),
-        ("work:chat#5", ("work", "chat", 5)),
-        ("work:рабочий-чат#12", ("work", "рабочий-чат", 12)),
-        ("default:team:core#1", ("default", "team:core", 1)),
+        ("chat#5", "chat"),
+        ("work:chat#5", "work:chat"),
+        ("work:рабочий-чат#12", "work:рабочий-чат"),
+        ("default:team:core#1", "default:team:core"),
+        ("a#b#3", "a#b"),
     ],
 )
-def test_split_handle(handle: str, expected: tuple[str | None, str, int]) -> None:
-    assert split_handle(handle) == expected
+def test_split_handle(handle: str, expected: str) -> None:
+    assert split_handle(handle)[0] == expected
 
 
-@pytest.mark.parametrize(
-    "handle", ["chat", "chat#", "#5", "chat#x", ":chat#5", "work:#5"]
-)
+@pytest.mark.parametrize("handle", ["chat", "chat#", "#5", "chat#x"])
 def test_split_handle_rejects_malformed(handle: str) -> None:
     with pytest.raises(ValueError, match="handle must be"):
         split_handle(handle)
+
+
+@pytest.mark.parametrize("handle", [":work-chat#2", "work:#2"])
+def test_named_handles_need_account_and_slug(
+    handle: str, accounts: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for account in ("work", "all"):
+        assert main(["--settings", str(accounts), "--account", account, "thread", handle]) == 2
+        assert "handle must be" in capsys.readouterr().err
