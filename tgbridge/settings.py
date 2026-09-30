@@ -63,9 +63,13 @@ class UserSettings:
                 "several accounts are configured and default_account is not set; "
                 f"pass --account with one of: {', '.join(self.account_names)} or all"
             )
+        return (self.account(name),)
+
+    def account(self, name: str) -> AccountSettings:
+        """The one account called `name`; `all` is not an account."""
         for account in self.accounts:
             if account.name == name:
-                return (account,)
+                return account
         raise ValueError(
             f"unknown account {name!r}; configured: {', '.join(self.account_names)}"
         )

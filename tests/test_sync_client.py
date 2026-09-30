@@ -147,3 +147,17 @@ def test_explicit_secrets_file_beats_environment(
     # Without an explicit account file the environment still wins.
     monkeypatch.setenv("HOME", str(tmp_path))
     assert _credentials() == (1, "env-hash")
+
+
+def test_account_secrets_file_is_not_topped_up_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TGQ_API_ID", "1")
+    monkeypatch.setenv("TGQ_API_HASH", "env-hash")
+    secrets = tmp_path / "secrets.env"
+    with pytest.raises(ValueError, match="secrets file does not exist"):
+        _credentials(secrets)
+    secrets.write_text("TGQ_API_ID=7\n")
+    secrets.chmod(0o600)
+    with pytest.raises(RuntimeError, match="must set both"):
+        _credentials(secrets)

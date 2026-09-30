@@ -133,8 +133,19 @@ def test_peer_slug_accepts_existing_slugs(tmp_path: Path, slug: str) -> None:
     assert load_config(config_file(tmp_path, content), environ={}).peers[0].slug == slug
 
 
-@pytest.mark.parametrize("slug", ["work:chat", " "])
-def test_peer_slug_rejects_account_delimiter_and_blank(tmp_path: Path, slug: str) -> None:
-    content = f"peers:\n  - slug: '{slug}'\n    id: 1\n    kind: group\n"
-    with pytest.raises(ValueError, match="must not contain ':'"):
+def test_peer_slug_rejects_blank(tmp_path: Path) -> None:
+    content = "peers:\n  - slug: ' '\n    id: 1\n    kind: group\n"
+    with pytest.raises(ValueError, match="must be non-empty"):
         load_config(config_file(tmp_path, content), environ={})
+
+
+def test_peer_slug_colon_is_refused_only_with_named_accounts(tmp_path: Path) -> None:
+    path = config_file(tmp_path, "peers:\n  - slug: 'team:core'\n    id: 1\n    kind: group\n")
+    assert load_config(path, environ={}).peers[0].slug == "team:core"
+    with pytest.raises(ValueError, match="must not contain ':' with named accounts"):
+        load_config(path, environ={}, named_accounts=True)
+
+
+def test_watchlist_root_must_be_a_mapping(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be a YAML mapping"):
+        load_config(config_file(tmp_path, "- slug: jobs\n"), environ={})

@@ -199,8 +199,8 @@ def _apply_user_settings(
     """Resolve the targeted account(s) and their paths onto `args`.
 
     A single account is applied to `args` itself; `--account all` leaves the
-    per-account paths unset on `args` and stores one namespace per account in
-    `args.targets`.
+    per-account paths unset on `args` and stores one single-account namespace
+    per account name in `args.targets`.
     """
     environment = os.environ if environ is None else environ
     settings = load_settings(args.settings, environ=environment)
@@ -221,16 +221,23 @@ def _apply_user_settings(
     )
     if not args.fanout:
         _apply_account(args, selected[0], environment, settings)
-        args.targets = [args]
         return settings
-    for option, _ in _ACCOUNT_PATH_OPTIONS:
-        if getattr(args, option, None) is not None:
-            raise ValueError(f"--{option} names one account and cannot be used with --account all")
-    args.targets = []
+    # Flat settings have one account, so `all` is that account and the path
+    # options and variables apply to it as usual.
+    if settings.named:
+        for option, _ in _ACCOUNT_PATH_OPTIONS:
+            if getattr(args, option, None) is not None:
+                raise ValueError(
+                    f"--{option} names one account and cannot be used with --account all"
+                )
+    targets: dict[str, argparse.Namespace] = {}
     for account in selected:
         target = argparse.Namespace(**vars(args))
+        target.fanout = False
         _apply_account(target, account, environment, settings)
-        args.targets.append(target)
+        targets[account.name] = target
+    args.targets = targets
+    args.user_settings = settings
     return settings
 
 
@@ -251,6 +258,7 @@ def _apply_account(
                 )
         paths_from_environment = {}
     args.account_name = account.name
+    args.named = settings.named
     args.audit_account = account.name if settings.named else None
     args.secrets = None if account.secrets is None else str(account.secrets)
     args.db = _select(args.db, paths_from_environment.get("TGQ_DB"), account.db, None)
@@ -267,20 +275,15 @@ def _apply_account(
             account.session,
             "tgq.session",
         )
-    # Under `accounts`, a value set for this account beats a process-wide
-    # export; the export still applies to accounts that leave it unset.
-    port_from_environment = environment.get("TGQ_TELEGRAM_PORT")
-    interval_from_environment = environment.get("TGQ_SYNC_INTERVAL")
-    if settings.named:
-        if account.telegram_port is not None:
-            port_from_environment = None
-        if account.sync_interval is not None:
-            interval_from_environment = None
-    args.telegram_port = _select(None, port_from_environment, account.telegram_port, None)
+    # One rule for flat and named settings alike: CLI, then the export, then
+    # the file. The port is a property of the host's network, not the account.
+    args.telegram_port = _select(
+        None, environment.get("TGQ_TELEGRAM_PORT"), account.telegram_port, None
+    )
     if hasattr(args, "interval"):
         args.interval = _select_interval(
             args.interval,
-            interval_from_environment,
+            environment.get("TGQ_SYNC_INTERVAL"),
             account.sync_interval,
             60,
         )
@@ -317,7 +320,9 @@ def _select_interval(
 
 
 def _load_watchlist(args: argparse.Namespace) -> Config:
-    return load_config(args.config, telegram_port=args.telegram_port)
+    return load_config(
+        args.config, telegram_port=args.telegram_port, named_accounts=args.named
+    )
 
 
 def _log_cli_error(error: Exception, exit_code: int, *, account: str | None = None) -> None:
@@ -381,6 +386,8 @@ def _run_fanout(args: argparse.Namespace) -> int:
     if args.command in {*_FANOUT_READS, "sync"} or (
         args.command == "outbox" and args.outbox_command == "list"
     ):
+        if args.command in _MESSAGE_READS:
+            _check_query(args)
         return _collect_each(args)
     if args.command in {"thread", "tag"}:
         account, _, _ = split_handle(args.handle)
@@ -389,20 +396,31 @@ def _run_fanout(args: argparse.Namespace) -> int:
                 f"--account all needs an account-qualified handle (account:slug#msg_id), "
                 f"got {args.handle!r}"
             )
-        target = _target(args, account)
+        if args.user_settings.named:
+            target = args.targets[args.user_settings.account(account).name]
+        else:
+            # Flat settings: the one account; a slug may itself contain ':'.
+            (target,) = args.targets.values()
         rows = _collect(target)
         if args.command == "thread" and rows:
-            rows = [_qualify(row, account) for row in rows]
+            rows = [_qualify(row, target.account_name) for row in rows]
         return _emit(rows, args)
     raise ValueError(f"{_command_name(args)} acts on one account; pass --account NAME, not all")
 
 
-def _target(args: argparse.Namespace, account: str) -> argparse.Namespace:
-    for target in args.targets:
-        if target.account_name == account:
-            return target
-    names = ", ".join(target.account_name for target in args.targets)
-    raise ValueError(f"unknown account {account!r}; configured: {names}")
+def _check_query(args: argparse.Namespace) -> None:
+    """Fail once, before the fan-out, on errors in the query itself.
+
+    A bad `--since` or FTS expression fails on every mirror alike; running it
+    against an empty mirror reports it as one usage error instead of one
+    per-account failure each.
+    """
+    connection = connect(":memory:")
+    try:
+        migrate(connection)
+        _dispatch(connection, next(iter(args.targets.values())))
+    finally:
+        connection.close()
 
 
 def _command_name(args: argparse.Namespace) -> str:
@@ -445,17 +463,17 @@ def _collect_each(args: argparse.Namespace) -> int:
     """Run one command on every account in turn and merge the rows.
 
     A failing account is logged with its name and skipped; the rest still run
-    and print, and the first failure's exit code wins.
+    and print, and the first failure's exit code wins. An error without a
+    stable exit code (a malformed watchlist, say) counts as a Telegram/runtime
+    failure (4) rather than aborting the remaining accounts.
     """
     results: list[tuple[argparse.Namespace, list[dict[str, Any]]]] = []
     failure = 0
-    for target in args.targets:
+    for target in args.targets.values():
         try:
             rows = _collect(target)
         except Exception as error:
-            code = _exit_code(error)
-            if code is None:
-                raise
+            code = _exit_code(error) or 4
             _log_cli_error(error, code, account=target.account_name)
             failure = failure or code
             continue
@@ -472,7 +490,12 @@ def _collect(args: argparse.Namespace) -> list[dict[str, Any]] | None:
         raise DatabaseError("--db or TGQ_DB is required")
     path = Path(args.db)
     write_command = args.command in {"sync", "send", "outbox", "tag", "retag"}
-    if not path.exists() and not write_command:
+    # `outbox list` migrates like other outbox commands but, being a read, must
+    # not create a mirror at a mistyped path.
+    creates_mirror = write_command and not (
+        args.command == "outbox" and args.outbox_command == "list"
+    )
+    if not path.exists() and not creates_mirror:
         raise DatabaseError(f"database does not exist: {path}")
     transient = bool(args.dry_run and write_command)
     connection = _dry_run_copy(path) if transient else connect(path)
@@ -637,6 +660,9 @@ def _local_handle(args: argparse.Namespace) -> tuple[str, int]:
     """(slug, msg_id) of the handle after checking any account prefix (D3 in #29)."""
     account, slug, msg_id = split_handle(args.handle)
     if account is not None and account != args.account_name:
+        if not args.named:
+            # Flat settings may keep slugs with ':' (`team:core#42`).
+            return f"{account}:{slug}", msg_id
         raise ValueError(
             f"handle {args.handle!r} belongs to account {account!r}, "
             f"but the selected account is {args.account_name!r}"

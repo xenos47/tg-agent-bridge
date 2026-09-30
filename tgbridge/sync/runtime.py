@@ -24,13 +24,23 @@ _LOG = get_logger("sync.runtime")
 
 
 def _credentials(secrets_path: str | Path | None = None) -> tuple[int, str]:
-    secrets = load_secrets(secrets_path)
-    # An account's own `secrets` file is more specific than a process-wide export.
-    file_first = secrets_path is not None
-    api_id = credential("TGQ_API_ID", secrets, file_first=file_first)
-    api_hash = credential("TGQ_API_HASH", secrets, file_first=file_first)
+    if secrets_path is None:
+        secrets = load_secrets()
+        api_id = credential("TGQ_API_ID", secrets)
+        api_hash = credential("TGQ_API_HASH", secrets)
+        if not api_id or not api_hash:
+            raise RuntimeError("TGQ_API_ID and TGQ_API_HASH are required")
+        return int(api_id), api_hash
+    # An account's own `secrets` file is authoritative as a whole: a missing or
+    # partial file must not be topped up key by key from another app's exports.
+    target = Path(secrets_path).expanduser()
+    if not target.exists():
+        raise ValueError(f"account secrets file does not exist: {target}")
+    secrets = load_secrets(target)
+    api_id = secrets.get("TGQ_API_ID")
+    api_hash = secrets.get("TGQ_API_HASH")
     if not api_id or not api_hash:
-        raise RuntimeError("TGQ_API_ID and TGQ_API_HASH are required")
+        raise RuntimeError(f"{target} must set both TGQ_API_ID and TGQ_API_HASH")
     return int(api_id), api_hash
 
 

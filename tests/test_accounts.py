@@ -254,7 +254,7 @@ def test_all_reads_survive_one_broken_mirror(
     assert _jsonl(captured.err)[0]["account"] == "work"
 
 
-def test_account_transport_settings_beat_environment(tmp_path: Path) -> None:
+def test_transport_environment_beats_account_settings(tmp_path: Path) -> None:
     settings = tmp_path / "config.yaml"
     settings.write_text(
         "accounts:\n"
@@ -271,14 +271,57 @@ def test_account_transport_settings_beat_environment(tmp_path: Path) -> None:
         "    sync:\n"
         "      interval: 900\n"
     )
-    environment = {"TGQ_TELEGRAM_PORT": "5222", "TGQ_SYNC_INTERVAL": "120"}
-    selected = {}
-    for name in ("personal", "work"):
-        args = _parser().parse_args(["--settings", str(settings), "--account", name, "sync"])
-        _apply_user_settings(args, environ=environment)
-        selected[name] = (args.telegram_port, args.interval)
-    # The export fills in for `personal`, but never overrides `work`'s own values.
-    assert selected == {"personal": ("5222", 120), "work": (443, 900)}
+    def selected(environment: dict[str, str]) -> dict[str, tuple[object, int]]:
+        values = {}
+        for name in ("personal", "work"):
+            argv = ["--settings", str(settings), "--account", name, "sync"]
+            args = _parser().parse_args(argv)
+            _apply_user_settings(args, environ=environment)
+            values[name] = (args.telegram_port, args.interval)
+        return values
+
+    # Same rule as flat settings: the export beats the file, the file the default.
+    exported = {"TGQ_TELEGRAM_PORT": "5222", "TGQ_SYNC_INTERVAL": "120"}
+    assert selected(exported) == {"personal": ("5222", 120), "work": ("5222", 120)}
+    assert selected({}) == {"personal": (None, 60), "work": (443, 900)}
+
+
+def test_all_outbox_list_does_not_create_missing_mirror(
+    accounts: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "work" / "messages.sqlite"
+    missing.unlink()
+    assert main(["--settings", str(accounts), "--account", "all", "outbox", "list"]) == 3
+    assert not missing.exists()
+    [error] = _jsonl(capsys.readouterr().err)
+    assert (error["account"], error["exit_code"]) == ("work", 3)
+
+
+def test_all_reads_survive_malformed_watchlist(
+    accounts: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "personal" / "watchlist.yaml").write_text("peers:\n  - {id: 1, kind: group}\n")
+    assert main(["--settings", str(accounts), "--account", "all", "outbox", "list"]) == 4
+    captured = capsys.readouterr()
+    [error] = _jsonl(captured.err)
+    assert (error["account"], error["error_type"], error["exit_code"]) == (
+        "personal",
+        "KeyError",
+        4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("option", "exit_code"), [(["--q", "foo("], 3), (["--since", "yesterday"], 2)]
+)
+def test_all_reports_query_errors_once_without_account(
+    accounts: Path, option: list[str], exit_code: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["--settings", str(accounts), "--account", "all", "search", *option]
+    assert main(argv) == exit_code
+    [error] = _jsonl(capsys.readouterr().err)
+    assert error["event"] == "cli_error"
+    assert "account" not in error
 
 
 def test_unknown_account_exits_two(accounts: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -334,7 +377,7 @@ def test_doctor_reminds_about_other_accounts_only_when_implicit(
 
 
 def test_legacy_settings_accept_default_and_all(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "messages.sqlite"
     _mirror(database, [(1, "hello", 1)])
@@ -346,7 +389,38 @@ def test_legacy_settings_accept_default_and_all(
     assert main([*prefix, "--account", "all", "search"]) == 0
     assert _ids(capsys.readouterr().out) == ["default:work-chat#1"]
     assert main([*prefix, "--account", "work", "search"]) == 2
+    capsys.readouterr()
+    # `all` is the one flat account, so its path option and variable both apply.
+    other = tmp_path / "other.sqlite"
+    _mirror(other, [(7, "other", 1)])
+    assert main([*prefix, "--account", "all", "--db", str(other), "search"]) == 0
+    assert _ids(capsys.readouterr().out) == ["default:work-chat#7"]
+    monkeypatch.setenv("TGQ_DB", str(other))
+    assert main([*prefix, "--account", "all", "search"]) == 0
+    assert _ids(capsys.readouterr().out) == ["default:work-chat#7"]
 
+
+def test_legacy_slugs_with_colon_keep_working(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "messages.sqlite"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    connection = connect(database)
+    migrate(connection)
+    peer(connection, slug="team:core")
+    message(connection, msg_id=42, text="hello", ts=1)
+    connection.close()
+    watchlist = tmp_path / "watchlist.yaml"
+    watchlist.write_text("peers:\n  - {slug: 'team:core', id: 1, kind: group}\n")
+    settings = tmp_path / "config.yaml"
+    settings.write_text(f"paths:\n  db: {database}\n  watchlist: {watchlist}\n")
+    prefix = ["--settings", str(settings)]
+    assert main([*prefix, "thread", "team:core#42"]) == 0
+    assert _ids(capsys.readouterr().out) == ["team:core#42"]
+    assert main([*prefix, "--account", "all", "thread", "default:team:core#42"]) == 0
+    assert _ids(capsys.readouterr().out) == ["default:team:core#42"]
+    assert main([*prefix, "tag", "team:core#42", "todo"]) == 0
+    assert main([*prefix, "retag"]) == 0
 
 def test_sync_all_runs_each_account_and_survives_one_failure(
     accounts: Path,
@@ -423,6 +497,7 @@ def test_single_account_sync_uses_account_session_and_secrets(
         ("chat#5", (None, "chat", 5)),
         ("work:chat#5", ("work", "chat", 5)),
         ("work:рабочий-чат#12", ("work", "рабочий-чат", 12)),
+        ("default:team:core#1", ("default", "team:core", 1)),
     ],
 )
 def test_split_handle(handle: str, expected: tuple[str | None, str, int]) -> None:
@@ -430,7 +505,7 @@ def test_split_handle(handle: str, expected: tuple[str | None, str, int]) -> Non
 
 
 @pytest.mark.parametrize(
-    "handle", ["chat", "chat#", "#5", "chat#x", ":chat#5", "work:#5", "a:b:c#1"]
+    "handle", ["chat", "chat#", "#5", "chat#x", ":chat#5", "work:#5"]
 )
 def test_split_handle_rejects_malformed(handle: str) -> None:
     with pytest.raises(ValueError, match="handle must be"):

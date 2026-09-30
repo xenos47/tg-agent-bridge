@@ -109,8 +109,10 @@ accounts:
 - `secrets` defaults to `~/.config/tgq/secrets.env`. `TGQ_API_ID` /
   `TGQ_API_HASH` identify the Telegram *application*, not the account, so one
   pair can serve every account; the account itself is the session file.
-  An account's own `secrets` file takes precedence over exported
-  `TGQ_API_ID` / `TGQ_API_HASH`; without one, the environment wins as before.
+  An account's own `secrets` file, when set, is that account's only source of
+  `TGQ_API_ID` / `TGQ_API_HASH`: it must exist and set both, and is never
+  topped up from the environment. Without one, the environment and the default
+  secrets file apply as before.
 - Pick an account with `--account NAME` or `TGQ_ACCOUNT` (an empty
   `TGQ_ACCOUNT=` counts as unset); otherwise `default_account` applies. With several accounts and no `default_account`,
   commands without `--account` fail with the list of names. A single account
@@ -120,8 +122,10 @@ accounts:
   mirrors: messages by time with `--limit` applied after the merge, every row
   gains an `account` field, and message handles become `account:slug#msg_id`.
   Output for a single account keeps plain `slug#msg_id`. An account whose
-  mirror cannot be read is logged as `cli_error` with its `account` and
-  skipped; the others still print, and the exit code reports the failure.
+  mirror cannot be read (or is missing: reads never create one) is logged as
+  `cli_error` with its `account` and skipped; the others still print, and the
+  exit code reports the failure. An error in the query itself (`--since`,
+  `--q` syntax) is reported once, before any mirror is read.
 - Handle-taking commands accept both forms. Under `--account all`, `thread`
   and `tag` need the qualified form and act on that one account.
 - Other writes (`send`, `outbox approve|reject|send`, `retag`,
@@ -130,19 +134,22 @@ accounts:
   when one fails (the exit code reports the first failure); prefer one timer
   per account.
 - Per-account paths are set in the settings file. `--db`, `--config` and
-  `--session` still override the one selected account; the `TGQ_DB`,
-  `TGQ_CONFIG` and `TGQ_SESSION` variables are rejected once an `accounts`
-  section exists, so an exported path cannot silently point every account at
-  one mirror.
-- `TGQ_TELEGRAM_PORT` and `TGQ_SYNC_INTERVAL` still apply, but only to
-  accounts that do not set `telegram.port` / `sync.interval` themselves.
+  `--session` still override the one selected account and are rejected with
+  `--account all`; the `TGQ_DB`, `TGQ_CONFIG` and `TGQ_SESSION` variables are
+  rejected once an `accounts` section exists, so an exported path cannot
+  silently point every account at one mirror. With flat settings `all` is the
+  one `default` account, so both the options and the variables apply to it.
+- `TGQ_TELEGRAM_PORT` and `TGQ_SYNC_INTERVAL` override every account's
+  `telegram.port` / `sync.interval`, exactly as they override flat settings:
+  the port is a property of the host's network, not of the account.
 - Tagging rules stay in each account's watchlist.
 
 Existing flat `paths` / `telegram` / `sync` settings keep working unchanged as
 one account named `default`. To add a second account, move those values under
 `accounts.default` (or another name) and add the new account next to it; the
-flat keys and `accounts` cannot be mixed. Peer slugs may contain only letters,
-digits, `_` and `-`, so `:` and `#` stay unambiguous in handles.
+flat keys and `accounts` cannot be mixed. With an `accounts` section, peer
+slugs must not contain `:`, which separates the account in
+`account:slug#msg_id`; flat settings keep accepting existing slugs with `:`.
 
 Resolve a peer named by the human before the first sync. This command reads only
 peer metadata, does not require `--db`, and does not add anything to the mirror:

@@ -22,8 +22,5 @@ def load_secrets(path: str | Path | None = None) -> dict[str, str]:
     return values
 
 
-def credential(name: str, secrets: dict[str, str], *, file_first: bool = False) -> str | None:
-    """Environment wins over the file, unless the file was chosen explicitly."""
-    if file_first:
-        return secrets.get(name) or os.environ.get(name)
+def credential(name: str, secrets: dict[str, str]) -> str | None:
     return os.environ.get(name) or secrets.get(name)

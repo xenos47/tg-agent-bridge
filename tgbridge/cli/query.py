@@ -26,14 +26,18 @@ HANDLE_FORMAT = "slug#msg_id or account:slug#msg_id"
 
 
 def split_handle(handle: str) -> tuple[str | None, str, int]:
-    """Split `slug#msg_id` or `account:slug#msg_id` into (account, slug, msg_id)."""
+    """Split `slug#msg_id` or `account:slug#msg_id` into (account, slug, msg_id).
+
+    Account names never contain ':', so the first one ends the account; a flat
+    (unnamed) setup may still have slugs with ':' and re-joins them itself.
+    """
     body, separator, raw_id = handle.rpartition("#")
     if not separator or not raw_id.isdigit() or not body:
         raise ValueError(f"handle must be {HANDLE_FORMAT}")
     account, colon, slug = body.partition(":")
     if not colon:
         return None, body, int(raw_id)
-    if not account or not slug or ":" in slug:
+    if not account or not slug:
         raise ValueError(f"handle must be {HANDLE_FORMAT}")
     return account, slug, int(raw_id)
 

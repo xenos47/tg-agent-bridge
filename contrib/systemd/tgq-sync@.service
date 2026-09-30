@@ -10,7 +10,7 @@ Type=oneshot
 #   ExecStart=/usr/bin/uv run --directory /path/to/tg-agent-bridge tgq --account %i sync
 ExecStart=tgq --account %i sync
 # Optional: EnvironmentFile=%h/.config/tgq/%i/secrets.env
-# Optional, for accounts without their own telegram.port:
+# Optional; overrides telegram.port in the settings:
 #   Environment=TGQ_TELEGRAM_PORT=5222
 
 [Install]

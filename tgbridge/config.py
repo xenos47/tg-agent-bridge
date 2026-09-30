@@ -170,12 +170,15 @@ def _peer_policy(
     return policies[name]
 
 
-def _slug(item: Mapping[str, Any]) -> str:
-    # Only ':' is refused: it separates the account in `account:slug#msg_id`.
-    # Anything stricter would strand existing mirrors, whose slugs are immutable.
+def _slug(item: Mapping[str, Any], *, named_accounts: bool) -> str:
+    # With named accounts ':' separates the account in `account:slug#msg_id`, so
+    # it is refused there. Flat settings keep accepting it, and nothing stricter
+    # is enforced: existing mirrors' slugs are immutable.
     slug = str(item["slug"])
-    if not slug.strip() or ":" in slug:
-        raise ValueError(f"peer slug {slug!r} must be non-empty and must not contain ':'")
+    if not slug.strip():
+        raise ValueError(f"peer slug {slug!r} must be non-empty")
+    if named_accounts and ":" in slug:
+        raise ValueError(f"peer slug {slug!r} must not contain ':' with named accounts")
     return slug
 
 
@@ -184,9 +187,12 @@ def load_config(
     *,
     environ: Mapping[str, str] | None = None,
     telegram_port: int | str | None = None,
+    named_accounts: bool = False,
 ) -> Config:
     """Load a privacy-bounded watchlist and policy configuration."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"watchlist {path} must be a YAML mapping")
     environment = os.environ if environ is None else environ
     policies, default_policy = _policies(raw)
     telegram = raw.get("telegram", {})
@@ -199,7 +205,7 @@ def load_config(
     peers = tuple(
         Peer(
             peer_id=int(item["id"]),
-            slug=_slug(item),
+            slug=_slug(item, named_accounts=named_accounts),
             kind=str(item["kind"]),
             title=str(item.get("title", item["slug"])),
             username=item.get("username"),
