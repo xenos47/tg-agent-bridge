@@ -102,7 +102,7 @@ async def test_sync_and_sender_share_configured_client_factory(
         ports.append(port)
         return FakeClient()
 
-    monkeypatch.setattr("tgbridge.sync.runtime._credentials", lambda: (1, "hash"))
+    monkeypatch.setattr("tgbridge.sync.runtime._credentials", lambda _secrets=None: (1, "hash"))
     monkeypatch.setattr("tgbridge.sync.runtime.create_client", fake_factory)
     config = Config(
         peers=(),

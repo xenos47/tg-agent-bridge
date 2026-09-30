@@ -289,7 +289,10 @@ def test_watchlist_resolve_uses_watchlist_session_and_port_from_settings(
     )
     observed: dict[str, object] = {}
 
-    async def fake_resolve(config: Config, query: str, *, session: str) -> list[Peer]:
+    async def fake_resolve(
+        config: Config, query: str, *, session: str, secrets: str | None
+    ) -> list[Peer]:
+        assert secrets is None
         observed["port"] = config.telegram.port
         observed["query"] = query
         observed["session"] = session
@@ -338,15 +341,16 @@ def test_sync_and_sender_receive_configured_session(
         *,
         session: str,
         dry_run: bool,
+        secrets: str | None,
     ) -> int:
-        del connection, config, dry_run
+        del connection, config, dry_run, secrets
         sessions.append(session)
         return 0
 
     async def fake_sender(
-        outbox: object, *, session: str, dry_run: bool
+        outbox: object, *, session: str, dry_run: bool, secrets: str | None
     ) -> int:
-        del outbox, dry_run
+        del outbox, dry_run, secrets
         sessions.append(session)
         return 0
 
@@ -441,8 +445,10 @@ def test_no_settings_preserves_existing_defaults(tmp_path: Path) -> None:
             "XDG_CONFIG_HOME": str(tmp_path / "missing"),
         },
     )
-    assert settings.db is None
+    assert settings.accounts[0].db is None
+    assert not settings.named
     assert args.db is None
+    assert args.account_name == "default"
     assert args.config == "watchlist.yaml"
 
 
@@ -536,8 +542,9 @@ def test_sync_loop_uses_configured_interval(
         *,
         session: str,
         interval: int,
+        secrets: str | None,
     ) -> None:
-        del connection, config
+        del connection, config, secrets
         observed["session"] = session
         observed["interval"] = interval
 
@@ -564,9 +571,14 @@ def test_sync_dry_run_uses_migrated_copy_and_leaves_old_database_untouched(
     seen: list[str] = []
 
     async def fake_sync(
-        connection: sqlite3.Connection, config: Config, *, session: str, dry_run: bool
+        connection: sqlite3.Connection,
+        config: Config,
+        *,
+        session: str,
+        dry_run: bool,
+        secrets: str | None,
     ) -> int:
-        del config, session
+        del config, session, secrets
         assert dry_run
         columns = {row[1] for row in connection.execute("PRAGMA table_info(sync_state)")}
         seen.extend(sorted(columns & {"last_rescan_at", "backfill_cutoff_ts"}))

@@ -1,7 +1,19 @@
 # Changelog
 
-## 0.1.1 — Unreleased
+## 0.2.0 — Unreleased
 
+- Add named accounts (#29): an `accounts` section and `default_account` in
+  `config.yaml` give each Telegram account its own mirror, session, watchlist
+  and optional secrets file. Select one with `--account NAME` / `TGQ_ACCOUNT`.
+  `--account all` merges read commands across mirrors, adds an `account` field
+  and prints `account:slug#msg_id` handles; single-account output is
+  unchanged. Writes other than `tag` with a qualified handle reject `all`;
+  `sync --account all` runs accounts sequentially. Existing flat settings are
+  the account `default`. Adds `contrib/systemd/tgq-sync@.{service,timer}`.
+- Named-account settings reject `TGQ_DB` / `TGQ_CONFIG` / `TGQ_SESSION`, and
+  accounts that share a database or a session directory.
+- Handles may be written as `account:slug#msg_id` everywhere a handle is
+  accepted. Watchlist peer slugs are validated: letters, digits, `_`, `-`.
 - Add `--full` to `search`, `thread`, `tail` and `digest`: the text is not
   truncated to the 400-character snippet, and each row gains a `links` field
   (`[{"text", "url"}]`) read from the stored message entities — text links

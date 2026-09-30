@@ -23,8 +23,8 @@ from tgbridge.sync.telethon_adapter import TelethonHistoryClient, TelethonResolv
 _LOG = get_logger("sync.runtime")
 
 
-def _credentials() -> tuple[int, str]:
-    secrets = load_secrets()
+def _credentials(secrets_path: str | Path | None = None) -> tuple[int, str]:
+    secrets = load_secrets(secrets_path)
     api_id = credential("TGQ_API_ID", secrets)
     api_hash = credential("TGQ_API_HASH", secrets)
     if not api_id or not api_hash:
@@ -38,8 +38,9 @@ async def run_sync(
     *,
     session: str | Path,
     dry_run: bool = False,
+    secrets: str | Path | None = None,
 ) -> int:
-    api_id, api_hash = _credentials()
+    api_id, api_hash = _credentials(secrets)
     client = create_client(
         session,
         api_id,
@@ -107,10 +108,11 @@ async def run_resolve(
     query: str,
     *,
     session: str | Path,
+    secrets: str | Path | None = None,
 ) -> list[Peer]:
     """Resolve peer metadata without touching the SQLite mirror."""
     parse_query(query)
-    api_id, api_hash = _credentials()
+    api_id, api_hash = _credentials(secrets)
     client = create_client(
         session,
         api_id,
@@ -138,11 +140,12 @@ async def run_sync_loop(
     *,
     session: str | Path,
     interval: int = 60,
+    secrets: str | Path | None = None,
 ) -> None:
     """Run foreground polling with a hard one-minute floor."""
     delay = max(interval, 60)
     while True:
-        await run_sync(connection, config, session=session)
+        await run_sync(connection, config, session=session, secrets=secrets)
         await asyncio.sleep(delay)
 
 
@@ -151,8 +154,9 @@ async def run_sender(
     *,
     session: str | Path,
     dry_run: bool = False,
+    secrets: str | Path | None = None,
 ) -> int:
-    api_id, api_hash = _credentials()
+    api_id, api_hash = _credentials(secrets)
     client = create_client(
         session,
         api_id,

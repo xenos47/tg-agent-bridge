@@ -123,3 +123,16 @@ def test_invalid_policy_config_is_rejected(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         load_config(config_file(tmp_path, content + "\n"), environ={})
+
+
+@pytest.mark.parametrize("slug", ["work-chat", "devops_jobs_feed", "рабочий-чат", "Chat2"])
+def test_peer_slug_accepts_word_characters_and_hyphen(tmp_path: Path, slug: str) -> None:
+    content = f"peers:\n  - slug: {slug}\n    id: 1\n    kind: group\n"
+    assert load_config(config_file(tmp_path, content), environ={}).peers[0].slug == slug
+
+
+@pytest.mark.parametrize("slug", ["work:chat", "chat#1", "work chat", "a/b"])
+def test_peer_slug_rejects_handle_delimiters(tmp_path: Path, slug: str) -> None:
+    content = f"peers:\n  - slug: '{slug}'\n    id: 1\n    kind: group\n"
+    with pytest.raises(ValueError, match="may contain only letters, digits"):
+        load_config(config_file(tmp_path, content), environ={})

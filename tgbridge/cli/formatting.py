@@ -50,6 +50,8 @@ def _render_rows(rows: Sequence[dict[str, Any]], output_format: str) -> str:
         current_peer: str | None = None
         for row in rows:
             peer = str(row.get("peer", "results"))
+            if "account" in row:
+                peer = f"{row['account']}:{peer}"
             if peer != current_peer:
                 lines.append(f"## {peer}")
                 current_peer = peer

@@ -27,10 +27,12 @@ class Outbox:
         config: Config,
         *,
         now: Callable[[], int] = lambda: int(time.time()),
+        account: str | None = None,
     ) -> None:
         self.connection = connection
         self.config = config
         self.now = now
+        self.account = account
 
     def enqueue(
         self,
@@ -189,6 +191,8 @@ class Outbox:
             raise PolicyError("minimum send gap has not elapsed")
 
     def _audit(self, actor: str, action: str, target: str, detail: dict[str, Any]) -> None:
+        if self.account is not None:
+            detail = {**detail, "account": self.account}
         self.connection.execute(
             "INSERT INTO audit(ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)",
             (self.now(), actor, action, target, json.dumps(detail, separators=(",", ":"))),

@@ -13,7 +13,13 @@ from typing import Any
 
 from tgbridge.cli.errors import DatabaseError, TgqError
 from tgbridge.cli.formatting import render
-from tgbridge.cli.query import doctor, peers, search_messages, thread
+from tgbridge.cli.query import (
+    doctor,
+    peers,
+    search_messages,
+    split_handle,
+    thread,
+)
 from tgbridge.config import (
     Config,
     append_peer,
@@ -24,17 +30,26 @@ from tgbridge.config import (
 from tgbridge.db import connect, migrate
 from tgbridge.logging import configure_logging, event, get_logger
 from tgbridge.outbox import Outbox
-from tgbridge.settings import UserSettings, load_settings
+from tgbridge.settings import ALL_ACCOUNTS, AccountSettings, UserSettings, load_settings
 from tgbridge.sync.lock import sync_lock_path, try_acquire_sync_lock
 from tgbridge.sync.models import Message
 
 FORMAT_VERSION = 1
 _LOG = get_logger("cli")
+# Read commands that `--account all` fans out over every account's mirror.
+_FANOUT_READS = {"search", "tail", "digest", "peers", "doctor"}
+_MESSAGE_READS = {"search", "tail", "digest"}
+# Path options that name one account's files and so cannot apply to `all`.
+_ACCOUNT_PATH_OPTIONS = (("db", "TGQ_DB"), ("config", "TGQ_CONFIG"), ("session", "TGQ_SESSION"))
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tgq")
     parser.add_argument("--settings")
+    parser.add_argument(
+        "--account",
+        help="account name from the settings file, or `all` for read commands",
+    )
     parser.add_argument("--db")
     parser.add_argument("--config")
     parser.add_argument("--format", choices=("jsonl", "md", "table", "count"), default="jsonl")
@@ -157,18 +172,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _apply_user_settings(args)
         return _run(args)
-    except TgqError as error:
-        _log_cli_error(error, error.exit_code)
+    except Exception as error:
+        exit_code = _exit_code(error)
+        if exit_code is None:
+            raise
+        _log_cli_error(error, exit_code)
+        return exit_code
+
+
+def _exit_code(error: Exception) -> int | None:
+    if isinstance(error, TgqError):
         return error.exit_code
-    except (ValueError, OSError) as error:
-        _log_cli_error(error, 2)
+    if isinstance(error, (ValueError, OSError)):
         return 2
-    except RuntimeError as error:
-        _log_cli_error(error, 4)
+    if isinstance(error, RuntimeError):
         return 4
-    except sqlite3.Error as error:
-        _log_cli_error(error, 3)
+    if isinstance(error, sqlite3.Error):
         return 3
+    return None
 
 
 def _apply_user_settings(
@@ -176,34 +197,82 @@ def _apply_user_settings(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> UserSettings:
+    """Resolve the targeted account(s) and their paths onto `args`.
+
+    A single account is applied to `args` itself; `--account all` leaves the
+    per-account paths unset on `args` and stores one namespace per account in
+    `args.targets`.
+    """
     environment = os.environ if environ is None else environ
     settings = load_settings(args.settings, environ=environment)
     args.settings = str(settings.source)
-    args.db = _select(args.db, environment.get("TGQ_DB"), settings.db, None)
+    requested = args.account if args.account is not None else environment.get("TGQ_ACCOUNT")
+    if requested is not None and not requested.strip():
+        raise ValueError("account name must not be empty")
+    selected = settings.select(requested)
+    args.fanout = requested == ALL_ACCOUNTS
+    # D1 in #29: an implicit default among several accounts is worth a reminder.
+    args.account_hint = (
+        None
+        if requested is not None or len(settings.accounts) < 2
+        else settings.account_names
+    )
+    if not args.fanout:
+        _apply_account(args, selected[0], environment, settings)
+        args.targets = [args]
+        return settings
+    for option, _ in _ACCOUNT_PATH_OPTIONS:
+        if getattr(args, option, None) is not None:
+            raise ValueError(f"--{option} names one account and cannot be used with --account all")
+    args.targets = []
+    for account in selected:
+        target = argparse.Namespace(**vars(args))
+        _apply_account(target, account, environment, settings)
+        args.targets.append(target)
+    return settings
+
+
+def _apply_account(
+    args: argparse.Namespace,
+    account: AccountSettings,
+    environment: Mapping[str, str],
+    settings: UserSettings,
+) -> None:
+    paths_from_environment: Mapping[str, str] = environment
+    if settings.named:
+        # One exported TGQ_DB would silently point every account at one mirror.
+        for _, variable in _ACCOUNT_PATH_OPTIONS:
+            if environment.get(variable) is not None:
+                raise ValueError(
+                    f"{variable} cannot be used with an accounts section in settings; "
+                    "set the path under accounts.<name> or pass the CLI option"
+                )
+        paths_from_environment = {}
+    args.account_name = account.name
+    args.audit_account = account.name if settings.named else None
+    args.secrets = None if account.secrets is None else str(account.secrets)
+    args.db = _select(args.db, paths_from_environment.get("TGQ_DB"), account.db, None)
     args.config = _select(
         args.config,
-        environment.get("TGQ_CONFIG"),
-        settings.watchlist,
+        paths_from_environment.get("TGQ_CONFIG"),
+        account.watchlist,
         "watchlist.yaml",
     )
     if hasattr(args, "session"):
         args.session = _select(
             args.session,
-            environment.get("TGQ_SESSION"),
-            settings.session,
+            paths_from_environment.get("TGQ_SESSION"),
+            account.session,
             "tgq.session",
         )
-    args.telegram_port = environment.get(
-        "TGQ_TELEGRAM_PORT", settings.telegram_port
-    )
+    args.telegram_port = environment.get("TGQ_TELEGRAM_PORT", account.telegram_port)
     if hasattr(args, "interval"):
         args.interval = _select_interval(
             args.interval,
             environment.get("TGQ_SYNC_INTERVAL"),
-            settings.sync_interval,
+            account.sync_interval,
             60,
         )
-    return settings
 
 
 def _select(
@@ -240,11 +309,13 @@ def _load_watchlist(args: argparse.Namespace) -> Config:
     return load_config(args.config, telegram_port=args.telegram_port)
 
 
-def _log_cli_error(error: Exception, exit_code: int) -> None:
+def _log_cli_error(error: Exception, exit_code: int, *, account: str | None = None) -> None:
+    fields: dict[str, Any] = {} if account is None else {"account": account}
     event(
         _LOG,
         40,
         "cli_error",
+        **fields,
         error_type=type(error).__name__,
         error=str(error),
         exit_code=exit_code,
@@ -268,8 +339,121 @@ def _dry_run_copy(path: Path) -> sqlite3.Connection:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.fanout:
+        return _run_fanout(args)
     if args.command == "watchlist":
         return _run_watchlist(args)
+    return _emit(_collect(args), args)
+
+
+def _emit(rows: list[dict[str, Any]] | None, args: argparse.Namespace) -> int:
+    if rows is None:
+        return 0
+    sys.stdout.write(_render(rows, args))
+    return 0 if rows else 1
+
+
+def _render(rows: list[dict[str, Any]], args: argparse.Namespace) -> str:
+    return render(
+        rows,
+        output_format=args.format,
+        max_tokens=args.max_tokens,
+        snippet_chars=None if getattr(args, "full", False) else 400,
+        format_version=args.format_version,
+    )
+
+
+def _run_fanout(args: argparse.Namespace) -> int:
+    """`--account all`: merge reads, route qualified handles, sync one by one."""
+    if args.command in _FANOUT_READS or (
+        args.command == "outbox" and args.outbox_command == "list"
+    ):
+        return _emit(_merge(args, [(t, _collect(t) or []) for t in args.targets]), args)
+    if args.command in {"thread", "tag"}:
+        account, _, _ = split_handle(args.handle)
+        if account is None:
+            raise ValueError(
+                f"--account all needs an account-qualified handle (account:slug#msg_id), "
+                f"got {args.handle!r}"
+            )
+        target = _target(args, account)
+        rows = _collect(target)
+        if args.command == "thread" and rows:
+            rows = [_qualify(row, account) for row in rows]
+        return _emit(rows, args)
+    if args.command == "sync":
+        return _sync_all(args)
+    raise ValueError(f"{_command_name(args)} acts on one account; pass --account NAME, not all")
+
+
+def _target(args: argparse.Namespace, account: str) -> argparse.Namespace:
+    for target in args.targets:
+        if target.account_name == account:
+            return target
+    names = ", ".join(target.account_name for target in args.targets)
+    raise ValueError(f"unknown account {account!r}; configured: {names}")
+
+
+def _command_name(args: argparse.Namespace) -> str:
+    sub = getattr(args, "outbox_command", None) or getattr(args, "watchlist_command", None)
+    return f"{args.command} {sub}" if sub else args.command
+
+
+def _qualify(row: dict[str, Any], account: str) -> dict[str, Any]:
+    """Add the account to a row; message handles become account:slug#msg_id."""
+    handle = row.get("id")
+    if isinstance(handle, str) and "#" in handle:
+        return {"id": f"{account}:{handle}", "account": account} | {
+            key: value for key, value in row.items() if key != "id"
+        }
+    return {"account": account, **row}
+
+
+def _merge(
+    args: argparse.Namespace,
+    results: list[tuple[argparse.Namespace, list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    """Merge per-account rows; ties keep account order, then per-account order."""
+    entries = [
+        (_qualify(row, target.account_name), account_index, row_index)
+        for account_index, (target, rows) in enumerate(results)
+        for row_index, row in enumerate(rows)
+    ]
+    if args.command in _MESSAGE_READS:
+        sign = 1 if getattr(args, "order", "desc") == "asc" else -1
+        entries.sort(key=lambda entry: (sign * int(entry[0]["ts"]), entry[1], entry[2]))
+        # A negative LIMIT means "no limit" in SQLite; keep that after the merge.
+        kept = entries if args.limit < 0 else entries[: args.limit]
+        return [row for row, _, _ in kept]
+    if args.command == "outbox":
+        entries.sort(key=lambda entry: (-int(entry[0]["created_at"]), entry[1], entry[2]))
+    return [row for row, _, _ in entries]
+
+
+def _sync_all(args: argparse.Namespace) -> int:
+    """Sync accounts sequentially; one failing account does not stop the rest."""
+    if args.loop:
+        raise ValueError("--loop syncs one account; run one timer per account instead")
+    rows: list[dict[str, Any]] = []
+    exit_code = 0
+    for target in args.targets:
+        try:
+            result = _collect(target)
+        except Exception as error:
+            code = _exit_code(error)
+            if code is None:
+                raise
+            _log_cli_error(error, code, account=target.account_name)
+            exit_code = exit_code or code
+            continue
+        rows.extend(_qualify(row, target.account_name) for row in result or [])
+    if rows:
+        sys.stdout.write(_render(rows, args))
+    return exit_code
+
+
+def _collect(args: argparse.Namespace) -> list[dict[str, Any]] | None:
+    """Run one command against one account's mirror."""
     if not args.db:
         raise DatabaseError("--db or TGQ_DB is required")
     path = Path(args.db)
@@ -283,18 +467,7 @@ def _run(args: argparse.Namespace) -> int:
             migrate(connection)
         elif int(connection.execute("PRAGMA user_version").fetchone()[0]) < 1:
             raise DatabaseError("database migrations have not been applied")
-        rows = _dispatch(connection, args)
-        if rows is None:
-            return 0
-        output = render(
-            rows,
-            output_format=args.format,
-            max_tokens=args.max_tokens,
-            snippet_chars=None if getattr(args, "full", False) else 400,
-            format_version=args.format_version,
-        )
-        sys.stdout.write(output)
-        return 0 if rows else 1
+        return _dispatch(connection, args)
     finally:
         connection.close()
 
@@ -319,7 +492,7 @@ def _dispatch(
             full=args.full,
         )
     if args.command == "thread":
-        return thread(connection, args.handle, full=args.full)
+        return thread(connection, _local_handle(args), full=args.full)
     if args.command == "tail":
         return search_messages(connection, peers=args.peer, limit=args.limit, full=args.full)
     if args.command == "digest":
@@ -327,7 +500,20 @@ def _dispatch(
     if args.command == "peers":
         return peers(connection)
     if args.command == "doctor":
-        return doctor(connection)
+        checks = doctor(connection)
+        if args.account_hint:
+            checks.append(
+                {
+                    "check": "accounts",
+                    "ok": True,
+                    "detail": (
+                        f"checked {args.account_name}; configured: "
+                        f"{','.join(args.account_hint)}; "
+                        "read commands accept --account all"
+                    ),
+                }
+            )
+        return checks
     if args.command == "sync":
         config = _load_watchlist(args)
         from tgbridge.sync.runtime import run_sync, run_sync_loop
@@ -352,17 +538,22 @@ def _dispatch(
                         config,
                         session=args.session,
                         interval=args.interval,
+                        secrets=args.secrets,
                     )
                 )
                 return None
             count = asyncio.run(
                 run_sync(
-                    connection, config, session=args.session, dry_run=args.dry_run
+                    connection,
+                    config,
+                    session=args.session,
+                    dry_run=args.dry_run,
+                    secrets=args.secrets,
                 )
             )
             return [{"fetched": count, "dry_run": args.dry_run}]
     if args.command == "send":
-        outbox = Outbox(connection, _load_watchlist(args))
+        outbox = Outbox(connection, _load_watchlist(args), account=args.audit_account)
         item_id = outbox.enqueue(
             args.peer,
             args.body,
@@ -386,7 +577,9 @@ def _run_watchlist(args: argparse.Namespace) -> int:
     config = _load_watchlist(args)
     from tgbridge.sync.runtime import run_resolve
 
-    matches = asyncio.run(run_resolve(config, args.query, session=args.session))
+    matches = asyncio.run(
+        run_resolve(config, args.query, session=args.session, secrets=args.secrets)
+    )
     if not matches:
         return 1
     if len(matches) > 1:
@@ -407,7 +600,7 @@ def _outbox_command(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> list[dict[str, Any]]:
     config = _load_watchlist(args)
-    outbox = Outbox(connection, config)
+    outbox = Outbox(connection, config, account=args.audit_account)
     if args.outbox_command == "list":
         return outbox.list(args.status)
     if args.outbox_command in {"approve", "reject"}:
@@ -417,23 +610,43 @@ def _outbox_command(
     if args.outbox_command == "send":
         from tgbridge.sync.runtime import run_sender
 
-        count = asyncio.run(run_sender(outbox, session=args.session, dry_run=args.dry_run))
+        count = asyncio.run(
+            run_sender(
+                outbox, session=args.session, dry_run=args.dry_run, secrets=args.secrets
+            )
+        )
         return [{"sent": count, "dry_run": args.dry_run}]
     raise ValueError(f"unknown outbox command: {args.outbox_command}")
 
 
+def _local_handle(args: argparse.Namespace) -> str:
+    """The handle as slug#msg_id after checking any account prefix (D3 in #29)."""
+    account, slug, msg_id = split_handle(args.handle)
+    if account is not None and account != args.account_name:
+        raise ValueError(
+            f"handle {args.handle!r} belongs to account {account!r}, "
+            f"but the selected account is {args.account_name!r}"
+        )
+    return f"{slug}#{msg_id}"
+
+
 def _parse_handle(connection: sqlite3.Connection, handle: str) -> tuple[int, int]:
-    slug, separator, raw_id = handle.rpartition("#")
-    if not separator or not raw_id.isdigit():
-        raise ValueError("handle must be slug#msg_id")
+    _, slug, msg_id = split_handle(handle)
     row = connection.execute("SELECT peer_id FROM peers WHERE slug=?", (slug,)).fetchone()
     if row is None:
         raise ValueError(f"unknown peer: {slug}")
-    return int(row["peer_id"]), int(raw_id)
+    return int(row["peer_id"]), msg_id
+
+
+def _audit_detail(args: argparse.Namespace, detail: dict[str, Any]) -> str:
+    if args.audit_account is not None:
+        detail = {**detail, "account": args.audit_account}
+    return json.dumps(detail, separators=(",", ":"))
 
 
 def _tag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
-    peer_id, msg_id = _parse_handle(connection, args.handle)
+    handle = _local_handle(args)
+    peer_id, msg_id = _parse_handle(connection, handle)
     if args.dry_run:
         return [{"id": args.handle, "tag": args.tag, "removed": args.remove, "dry_run": True}]
     with connection:
@@ -457,8 +670,8 @@ def _tag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[
                 int(time.time()),
                 args.actor,
                 "tag.remove" if args.remove else "tag.add",
-                args.handle,
-                json.dumps({"tag": args.tag}, separators=(",", ":")),
+                handle,
+                _audit_detail(args, {"tag": args.tag}),
             ),
         )
     return [{"id": args.handle, "tag": args.tag, "removed": args.remove, "dry_run": False}]
@@ -502,7 +715,7 @@ def _retag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dic
                 "human",
                 "tag.retag",
                 None,
-                json.dumps({"messages": len(rows), "rules": len(config.rules)}),
+                _audit_detail(args, {"messages": len(rows), "rules": len(config.rules)}),
             ),
         )
     return [{"retagged": len(rows), "rules": len(config.rules), "dry_run": False}]
