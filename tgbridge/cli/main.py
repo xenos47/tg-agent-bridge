@@ -15,6 +15,7 @@ from tgbridge.cli.formatting import render
 from tgbridge.cli.query import (
     HANDLE_FORMAT,
     doctor,
+    parse_time,
     peers,
     search_messages,
     split_handle,
@@ -30,7 +31,13 @@ from tgbridge.config import (
 from tgbridge.db import connect, migrate
 from tgbridge.logging import configure_logging, event, get_logger
 from tgbridge.outbox import Outbox, audit_detail
-from tgbridge.settings import ALL_ACCOUNTS, AccountSettings, UserSettings, load_settings
+from tgbridge.settings import (
+    ALL_ACCOUNTS,
+    AccountSettings,
+    UserSettings,
+    environment_value,
+    load_settings,
+)
 from tgbridge.sync.lock import sync_lock_path, try_acquire_sync_lock
 from tgbridge.sync.models import Message
 
@@ -206,14 +213,18 @@ def _apply_user_settings(
     environment = os.environ if environ is None else environ
     settings = load_settings(args.settings, environ=environment)
     args.settings = str(settings.source)
-    requested = args.account
-    if requested is None:
+    if args.account is not None:
+        # A generated unit or script easily quotes a stray space into the flag.
+        requested = args.account.strip()
+        if not requested:
+            raise ValueError("account name must not be empty")
+    else:
         # `TGQ_ACCOUNT=` in an env file or unit is the usual way to unset it.
-        requested = environment.get("TGQ_ACCOUNT", "").strip() or None
-    if requested is not None and not requested.strip():
-        raise ValueError("account name must not be empty")
+        requested = environment_value(environment, "TGQ_ACCOUNT")
     selected = settings.select(requested)
-    args.fanout = requested == ALL_ACCOUNTS
+    # Flat settings have one account, so `all` is that account: no fan-out, no
+    # account prefix on handles, and the path options and variables apply.
+    args.fanout = requested == ALL_ACCOUNTS and settings.named
     # D1 in #29: an implicit default among several accounts is worth a reminder.
     args.account_hint = (
         None
@@ -223,14 +234,9 @@ def _apply_user_settings(
     if not args.fanout:
         _apply_account(args, selected[0], environment, settings)
         return settings
-    # Flat settings have one account, so `all` is that account and the path
-    # options and variables apply to it as usual.
-    if settings.named:
-        for option, _ in _ACCOUNT_PATH_OPTIONS:
-            if getattr(args, option, None) is not None:
-                raise ValueError(
-                    f"--{option} names one account and cannot be used with --account all"
-                )
+    for option, _ in _ACCOUNT_PATH_OPTIONS:
+        if getattr(args, option, None) is not None:
+            raise ValueError(f"--{option} names one account and cannot be used with --account all")
     targets: dict[str, argparse.Namespace] = {}
     for account in selected:
         target = argparse.Namespace(**vars(args))
@@ -249,8 +255,7 @@ def _apply_account(
     settings: UserSettings,
 ) -> None:
     exported = {
-        variable: _environment_value(environment, variable)
-        for _, variable in _ACCOUNT_PATH_OPTIONS
+        variable: environment_value(environment, variable) for _, variable in _ACCOUNT_PATH_OPTIONS
     }
     if settings.named:
         # One exported TGQ_DB would silently point every account at one mirror.
@@ -288,21 +293,15 @@ def _apply_account(
     # One rule for flat and named settings alike: CLI, then the export, then
     # the file. The port is a property of the host's network, not the account.
     args.telegram_port = _select(
-        None, _environment_value(environment, "TGQ_TELEGRAM_PORT"), account.telegram_port, None
+        None, environment_value(environment, "TGQ_TELEGRAM_PORT"), account.telegram_port, None
     )
     if hasattr(args, "interval"):
         args.interval = _select_interval(
             args.interval,
-            _environment_value(environment, "TGQ_SYNC_INTERVAL"),
+            environment_value(environment, "TGQ_SYNC_INTERVAL"),
             account.sync_interval,
             60,
         )
-
-
-def _environment_value(environment: Mapping[str, str], variable: str) -> str | None:
-    """An exported TGQ_* value; empty counts as unset, as for TGQ_ACCOUNT."""
-    value = environment.get(variable)
-    return value if value is not None and value.strip() else None
 
 
 def _select(
@@ -406,17 +405,13 @@ def _run_fanout(args: argparse.Namespace) -> int:
             _check_query(args)
         return _collect_each(args)
     if args.command in {"thread", "tag"}:
-        if args.user_settings.named:
-            account, _, _ = _named_handle(args.handle)
-            if account is None:
-                raise ValueError(
-                    f"--account all needs an account-qualified handle (account:slug#msg_id), "
-                    f"got {args.handle!r}"
-                )
-            target = args.targets[args.user_settings.account(account).name]
-        else:
-            # Flat settings: `all` is the one account, so any handle routes there.
-            (target,) = args.targets.values()
+        account, _, _ = _named_handle(args.handle)
+        if account is None:
+            raise ValueError(
+                f"--account all needs an account-qualified handle (account:slug#msg_id), "
+                f"got {args.handle!r}"
+            )
+        target = args.targets[args.user_settings.account(account).name]
         rows = _collect(target)
         if args.command == "thread" and rows:
             rows = [_qualify(row, target.account_name) for row in rows]
@@ -427,16 +422,22 @@ def _run_fanout(args: argparse.Namespace) -> int:
 def _check_query(args: argparse.Namespace) -> None:
     """Fail once, before the fan-out, on errors in the query itself.
 
-    A bad `--since` or FTS expression fails on every mirror alike; running it
-    against an empty mirror reports it as one usage error instead of one
-    per-account failure each.
+    A bad `--since` or FTS expression fails on every mirror alike, so it is
+    reported once, without an account, instead of once per account. Times are
+    parsed directly; the FTS expression is compiled against a throwaway table
+    shaped like `messages_fts`, and fails as a single mirror would (exit 3).
     """
-    connection = connect(":memory:")
-    try:
-        migrate(connection)
-        _dispatch(connection, next(iter(args.targets.values())))
-    finally:
-        connection.close()
+    for value in (getattr(args, "since", None), getattr(args, "until", None)):
+        if value is not None:
+            parse_time(value)
+    query = getattr(args, "q", None)
+    if query:
+        probe = sqlite3.connect(":memory:")
+        try:
+            probe.execute("CREATE VIRTUAL TABLE probe USING fts5(text)")
+            probe.execute("SELECT rowid FROM probe WHERE text MATCH ?", (query,)).fetchall()
+        finally:
+            probe.close()
 
 
 def _command_name(args: argparse.Namespace) -> str:
@@ -551,7 +552,7 @@ def _dispatch(
             full=args.full,
         )
     if args.command == "thread":
-        return thread(connection, *_local_handle(connection, args), full=args.full)
+        return thread(connection, *_local_handle(args), full=args.full)
     if args.command == "tail":
         return search_messages(connection, peers=args.peer, limit=args.limit, full=args.full)
     if args.command == "digest":
@@ -689,7 +690,7 @@ def _named_handle(handle: str) -> tuple[str | None, str, int]:
     return account, slug, msg_id
 
 
-def _local_handle(connection: sqlite3.Connection, args: argparse.Namespace) -> tuple[str, int]:
+def _local_handle(args: argparse.Namespace) -> tuple[str, int]:
     """(slug, msg_id) of the handle in the selected account's mirror (D3 in #29)."""
     if args.named:
         account, slug, msg_id = _named_handle(args.handle)
@@ -699,14 +700,9 @@ def _local_handle(connection: sqlite3.Connection, args: argparse.Namespace) -> t
                 f"but the selected account is {args.account_name!r}"
             )
         return slug, msg_id
-    # Flat settings keep slugs with ':' (`team:core#42`), so the whole body is
-    # tried as a slug first; otherwise a `default:` prefix, as `--account all`
-    # prints it, is dropped.
-    body, msg_id = split_handle(args.handle)
-    account, _, slug = body.partition(":")
-    if account == args.account_name and slug and _find_peer_id(connection, body) is None:
-        return slug, msg_id
-    return body, msg_id
+    # Flat settings keep slugs with ':' (`team:core#42`) and never print an
+    # account prefix, so the whole body is the slug.
+    return split_handle(args.handle)
 
 
 def _find_peer_id(connection: sqlite3.Connection, slug: str) -> int | None:
@@ -722,7 +718,7 @@ def _peer_id(connection: sqlite3.Connection, slug: str) -> int:
 
 
 def _tag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
-    slug, msg_id = _local_handle(connection, args)
+    slug, msg_id = _local_handle(args)
     peer_id = _peer_id(connection, slug)
     if args.dry_run:
         return [{"id": args.handle, "tag": args.tag, "removed": args.remove, "dry_run": True}]

@@ -221,7 +221,7 @@ def test_several_accounts_without_default_need_account(
 ) -> None:
     accounts.write_text(accounts.read_text().replace("default_account: personal\n", ""))
     assert main(["--settings", str(accounts), "search"]) == 2
-    assert "pass --account with one of: personal, work or all" in capsys.readouterr().err
+    assert "pass --account with one of: personal, work" in capsys.readouterr().err
     assert main(["--settings", str(accounts), "--account", "work", "search"]) == 0
 
 
@@ -445,18 +445,25 @@ def test_legacy_settings_accept_default_and_all(
     prefix = ["--settings", str(settings)]
     assert main([*prefix, "--account", "default", "search"]) == 0
     assert _ids(capsys.readouterr().out) == ["work-chat#1"]
+    # `all` is plainly the one flat account: no merge, no `default:` prefix.
     assert main([*prefix, "--account", "all", "search"]) == 0
-    assert _ids(capsys.readouterr().out) == ["default:work-chat#1"]
+    assert _ids(capsys.readouterr().out) == ["work-chat#1"]
+    assert main([*prefix, "--account", "all", "search"]) == 0
+    assert "account" not in _jsonl(capsys.readouterr().out)[0]
+    assert main([*prefix, "--account", " all ", "search"]) == 0
+    assert _ids(capsys.readouterr().out) == ["work-chat#1"]
     assert main([*prefix, "--account", "work", "search"]) == 2
     capsys.readouterr()
-    # `all` is the one flat account, so its path option and variable both apply.
+    # Its path option and variable both apply, and writes accept it.
     other = tmp_path / "other.sqlite"
     _mirror(other, [(7, "other", 1)])
     assert main([*prefix, "--account", "all", "--db", str(other), "search"]) == 0
-    assert _ids(capsys.readouterr().out) == ["default:work-chat#7"]
+    assert _ids(capsys.readouterr().out) == ["work-chat#7"]
     monkeypatch.setenv("TGQ_DB", str(other))
     assert main([*prefix, "--account", "all", "search"]) == 0
-    assert _ids(capsys.readouterr().out) == ["default:work-chat#7"]
+    assert _ids(capsys.readouterr().out) == ["work-chat#7"]
+    assert main([*prefix, "--account", "all", "tag", "work-chat#7", "todo"]) == 0
+    capsys.readouterr()
 
 
 def test_legacy_slugs_with_colon_keep_working(
@@ -476,17 +483,18 @@ def test_legacy_slugs_with_colon_keep_working(
     prefix = ["--settings", str(settings)]
     assert main([*prefix, "thread", "team:core#42"]) == 0
     assert _ids(capsys.readouterr().out) == ["team:core#42"]
-    assert main([*prefix, "--account", "all", "thread", "default:team:core#42"]) == 0
-    assert _ids(capsys.readouterr().out) == ["default:team:core#42"]
-    # `all` is the one flat account, so an unqualified handle is fine too.
+    # `all` is the one flat account and prints no prefix, so the handle is the same.
     assert main([*prefix, "--account", "all", "thread", "team:core#42"]) == 0
-    assert _ids(capsys.readouterr().out) == ["default:team:core#42"]
+    assert _ids(capsys.readouterr().out) == ["team:core#42"]
+    # `default:` is not a prefix here but part of a (missing) slug.
+    assert main([*prefix, "--account", "all", "thread", "default:team:core#42"]) == 1
+    assert _ids(capsys.readouterr().out) == []
     assert main([*prefix, "tag", "team:core#42", "todo"]) == 0
     assert main([*prefix, "retag"]) == 0
 
 
 @pytest.mark.parametrize("slug", ["default:ops", ":ops", "team:"])
-def test_flat_colon_slug_resolves_as_a_whole_first(
+def test_flat_colon_slug_is_the_whole_body(
     slug: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "messages.sqlite"
@@ -507,10 +515,15 @@ def test_flat_colon_slug_resolves_as_a_whole_first(
     check = sqlite3.connect(database)
     assert check.execute("SELECT peer_id, msg_id FROM tags").fetchall() == [(2, 42)]
     check.close()
-    # The `default:` prefix that `--account all` prints still resolves.
-    assert main([*prefix, "thread", "default:ops#42"]) == 0
-    expected = "colon slug" if slug == "default:ops" else "plain ops"
-    assert [row["text"] for row in _jsonl(capsys.readouterr().out)] == [expected]
+    # No prefix is ever stripped: `default:ops` is a slug or nothing.
+    if slug == "default:ops":
+        assert main([*prefix, "thread", "default:ops#42"]) == 0
+        assert [row["text"] for row in _jsonl(capsys.readouterr().out)] == ["colon slug"]
+    else:
+        assert main([*prefix, "thread", "default:ops#42"]) == 1
+        assert _ids(capsys.readouterr().out) == []
+        assert main([*prefix, "tag", "default:ops#42", "todo"]) == 2
+        assert "unknown peer: default:ops" in capsys.readouterr().err
 
 def test_sync_all_runs_each_account_and_survives_one_failure(
     accounts: Path,

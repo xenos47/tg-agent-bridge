@@ -159,7 +159,7 @@ def test_several_accounts_without_default_require_explicit_choice(tmp_path: Path
     content = _TWO_ACCOUNTS.replace("default_account: personal\n", "")
     settings = load_settings(_write(tmp_path, content), environ={})
     assert settings.default_account is None
-    with pytest.raises(ValueError, match=r"default_account is not set.*personal, work or all"):
+    with pytest.raises(ValueError, match=r"default_account is not set.*personal, work$"):
         settings.select(None)
     assert [a.name for a in settings.select("work")] == ["work"]
 

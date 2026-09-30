@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from tgbridge.settings import environment_value
 from tgbridge.sync.models import Peer, SyncPolicy, TagRule
 
 _DAY = 86400
@@ -178,7 +179,11 @@ def _slug(item: Mapping[str, Any], *, named_accounts: bool) -> str:
     if not slug.strip():
         raise ValueError(f"peer slug {slug!r} must be non-empty")
     if named_accounts and ":" in slug:
-        raise ValueError(f"peer slug {slug!r} must not contain ':' with named accounts")
+        raise ValueError(
+            f"peer slug {slug!r} must not contain ':' with named accounts; a mirror's "
+            "slugs are immutable, so rename it in the watchlist and start that account "
+            "from a fresh mirror"
+        )
     return slug
 
 
@@ -233,8 +238,7 @@ def load_config(
     selected_port = (
         telegram_port
         if telegram_port is not None
-        # An empty export counts as unset, as in the CLI.
-        else (environment.get("TGQ_TELEGRAM_PORT") or "").strip() or configured_port
+        else environment_value(environment, "TGQ_TELEGRAM_PORT") or configured_port
     )
     try:
         peers, rules = _peers(raw, named_accounts, policies, default_policy), _rules(raw)
@@ -243,6 +247,10 @@ def load_config(
         raise ValueError(
             f"watchlist {path}: malformed peer or rule entry ({type(error).__name__}: {error})"
         ) from error
+    except ValueError as error:
+        # A bad value (`id: abc`, a slug with ':') already says what is wrong;
+        # it only lacks which file.
+        raise ValueError(f"watchlist {path}: {error}") from error
     limits = raw.get("rate_limits", {})
     return Config(
         peers=peers,

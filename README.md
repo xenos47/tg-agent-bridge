@@ -128,9 +128,8 @@ accounts:
   `--q` syntax) is reported once, before any mirror is read.
 - Handle-taking commands accept both forms. With named accounts, `thread`
   and `tag` under `--account all` need the qualified form and act on that one
-  account. With flat settings a handle is first looked up as a whole slug
-  (so `team:core#42` stays that peer), and only then is a `default:` prefix
-  dropped; `all` needs no prefix there.
+  account. Flat settings never print an account prefix, so the whole body of
+  a handle is the slug (`team:core#42` stays that peer).
 - Other writes (`send`, `outbox approve|reject|send`, `retag`,
   `watchlist resolve`) always target one account and reject `all`.
   `sync --account all` syncs the accounts one after another and keeps going
@@ -143,8 +142,9 @@ accounts:
   silently point every account at one mirror. A variable is only rejected
   when it would apply: the matching CLI option overrides it, and a command
   without that option (`search` has no `--session`) ignores it. Like
-  `TGQ_ACCOUNT=`, an empty `TGQ_*` variable counts as unset. With flat settings `all` is the
-  one `default` account, so both the options and the variables apply to it.
+  `TGQ_ACCOUNT=`, an empty `TGQ_*` variable counts as unset. With flat settings
+  `--account all` is plainly the one `default` account: nothing is merged or
+  prefixed, every command accepts it, and the options and variables apply.
 - `TGQ_TELEGRAM_PORT` and `TGQ_SYNC_INTERVAL` override every account's
   `telegram.port` / `sync.interval`, exactly as they override flat settings:
   the port is a property of the host's network, not of the account.
@@ -156,6 +156,8 @@ one account named `default`. To add a second account, move those values under
 flat keys and `accounts` cannot be mixed. With an `accounts` section, peer
 slugs must not contain `:`, which separates the account in
 `account:slug#msg_id`; flat settings keep accepting existing slugs with `:`.
+A mirror's slugs are immutable, so a peer whose slug contains `:` must be
+renamed in the watchlist and its account started from a fresh mirror.
 
 Resolve a peer named by the human before the first sync. This command reads only
 peer metadata, does not require `--db`, and does not add anything to the mirror:

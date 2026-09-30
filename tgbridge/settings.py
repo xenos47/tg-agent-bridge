@@ -12,6 +12,12 @@ import yaml
 
 LEGACY_ACCOUNT = "default"
 ALL_ACCOUNTS = "all"
+
+
+def environment_value(environment: Mapping[str, str], variable: str) -> str | None:
+    """An exported TGQ_* value; empty or blank counts as unset, as for TGQ_ACCOUNT."""
+    value = environment.get(variable)
+    return value if value is not None and value.strip() else None
 _ACCOUNT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _ACCOUNT_KEYS = {"db", "watchlist", "session", "secrets", "telegram", "sync"}
 _REQUIRED_ACCOUNT_PATHS = ("db", "watchlist", "session")
@@ -61,7 +67,7 @@ class UserSettings:
                 return self.accounts
             raise ValueError(
                 "several accounts are configured and default_account is not set; "
-                f"pass --account with one of: {', '.join(self.account_names)} or all"
+                f"pass --account with one of: {', '.join(self.account_names)}"
             )
         return (self.account(name),)
 

@@ -1,7 +1,8 @@
 [Unit]
 Description=tg-agent-bridge oneshot Telegram sync
 Documentation=https://github.com/xenos47/tg-agent-bridge
-After=network-online.target
+# No After=network-online.target: a user manager has no such target. A sync
+# that starts before the network is up fails and the timer retries it.
 
 [Service]
 Type=oneshot
