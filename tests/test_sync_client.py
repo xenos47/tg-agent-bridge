@@ -11,7 +11,7 @@ from tgbridge.config import Config, TelegramSettings
 from tgbridge.logging import configure_logging
 from tgbridge.outbox import Outbox
 from tgbridge.sync.client import ForcedPortSQLiteSession, create_client, start_client
-from tgbridge.sync.runtime import run_sender, run_sync
+from tgbridge.sync.runtime import _credentials, run_sender, run_sync
 
 
 def mode(path: Path) -> int:
@@ -133,3 +133,17 @@ async def test_start_failure_logs_safe_http_hint(
     output = capsys.readouterr().err
     assert '"error_type":"http_interception"' in output
     assert "PRIVATE-BUFFER" not in output
+
+
+def test_explicit_secrets_file_beats_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("TGQ_API_ID=7\nTGQ_API_HASH=file-hash\n")
+    secrets.chmod(0o600)
+    monkeypatch.setenv("TGQ_API_ID", "1")
+    monkeypatch.setenv("TGQ_API_HASH", "env-hash")
+    assert _credentials(secrets) == (7, "file-hash")
+    # Without an explicit account file the environment still wins.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert _credentials() == (1, "env-hash")

@@ -642,11 +642,11 @@ def test_raw_json_selected_only_with_full(db: sqlite3.Connection) -> None:
     db.set_trace_callback(statements.append)
 
     search_messages(db)
-    thread(db, "work-chat#1")
+    thread(db, "work-chat", 1)
     assert not any("raw_json" in sql for sql in statements)
 
     search_messages(db, full=True)
-    thread(db, "work-chat#1", full=True)
+    thread(db, "work-chat", 1, full=True)
     assert sum("raw_json" in sql for sql in statements) == 2
 
 

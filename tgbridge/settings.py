@@ -179,7 +179,8 @@ def _named_account(
     values = _mapping(raw, label)
     _reject_unknown(values, _ACCOUNT_KEYS, label)
     for key in _REQUIRED_ACCOUNT_PATHS:
-        if key not in values:
+        # `db: ~` is YAML null: as good as absent, not a path.
+        if values.get(key) is None:
             raise ValueError(f"{label}.{key} is required")
     telegram = _mapping(values.get("telegram", {}), f"{label}.telegram")
     _reject_unknown(telegram, {"port"}, f"{label}.telegram")

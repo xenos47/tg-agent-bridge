@@ -117,11 +117,8 @@ def search_messages(
 
 
 def thread(
-    connection: sqlite3.Connection, handle: str, *, full: bool = False
+    connection: sqlite3.Connection, slug: str, msg_id: int, *, full: bool = False
 ) -> list[dict[str, Any]]:
-    account, slug, msg_id = split_handle(handle)
-    if account is not None:
-        raise ValueError("thread expects slug#msg_id; resolve the account first")
     rows = connection.execute(
         f"""
         WITH RECURSIVE ancestors(peer_id, msg_id, reply_to, depth) AS (

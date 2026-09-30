@@ -13,9 +13,6 @@ from tgbridge.sync.models import Peer, SyncPolicy, TagRule
 
 _DAY = 86400
 _DURATION = re.compile(r"^([1-9]\d*)([dw])$")
-# Letters (any script), digits, '_' and '-': never ':' or '#', which delimit
-# message handles such as `account:slug#msg_id`.
-_SLUG = re.compile(r"^[\w-]+$")
 # Used when a watchlist has no `default_policy`: shallow backfill, but never
 # deletes data that an older unbounded configuration already mirrored.
 DEFAULT_POLICY = SyncPolicy(history=14 * _DAY)
@@ -174,11 +171,11 @@ def _peer_policy(
 
 
 def _slug(item: Mapping[str, Any]) -> str:
+    # Only ':' is refused: it separates the account in `account:slug#msg_id`.
+    # Anything stricter would strand existing mirrors, whose slugs are immutable.
     slug = str(item["slug"])
-    if not _SLUG.fullmatch(slug):
-        raise ValueError(
-            f"peer slug {slug!r} may contain only letters, digits, '_' and '-'"
-        )
+    if not slug.strip() or ":" in slug:
+        raise ValueError(f"peer slug {slug!r} must be non-empty and must not contain ':'")
     return slug
 
 

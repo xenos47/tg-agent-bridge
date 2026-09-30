@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-import json
 import os
 import sqlite3
 import sys
@@ -29,7 +28,7 @@ from tgbridge.config import (
 )
 from tgbridge.db import connect, migrate
 from tgbridge.logging import configure_logging, event, get_logger
-from tgbridge.outbox import Outbox
+from tgbridge.outbox import Outbox, audit_detail
 from tgbridge.settings import ALL_ACCOUNTS, AccountSettings, UserSettings, load_settings
 from tgbridge.sync.lock import sync_lock_path, try_acquire_sync_lock
 from tgbridge.sync.models import Message
@@ -206,7 +205,10 @@ def _apply_user_settings(
     environment = os.environ if environ is None else environ
     settings = load_settings(args.settings, environ=environment)
     args.settings = str(settings.source)
-    requested = args.account if args.account is not None else environment.get("TGQ_ACCOUNT")
+    requested = args.account
+    if requested is None:
+        # `TGQ_ACCOUNT=` in an env file or unit is the usual way to unset it.
+        requested = environment.get("TGQ_ACCOUNT", "").strip() or None
     if requested is not None and not requested.strip():
         raise ValueError("account name must not be empty")
     selected = settings.select(requested)
@@ -265,11 +267,20 @@ def _apply_account(
             account.session,
             "tgq.session",
         )
-    args.telegram_port = environment.get("TGQ_TELEGRAM_PORT", account.telegram_port)
+    # Under `accounts`, a value set for this account beats a process-wide
+    # export; the export still applies to accounts that leave it unset.
+    port_from_environment = environment.get("TGQ_TELEGRAM_PORT")
+    interval_from_environment = environment.get("TGQ_SYNC_INTERVAL")
+    if settings.named:
+        if account.telegram_port is not None:
+            port_from_environment = None
+        if account.sync_interval is not None:
+            interval_from_environment = None
+    args.telegram_port = _select(None, port_from_environment, account.telegram_port, None)
     if hasattr(args, "interval"):
         args.interval = _select_interval(
             args.interval,
-            environment.get("TGQ_SYNC_INTERVAL"),
+            interval_from_environment,
             account.sync_interval,
             60,
         )
@@ -365,10 +376,12 @@ def _render(rows: list[dict[str, Any]], args: argparse.Namespace) -> str:
 
 def _run_fanout(args: argparse.Namespace) -> int:
     """`--account all`: merge reads, route qualified handles, sync one by one."""
-    if args.command in _FANOUT_READS or (
+    if args.command == "sync" and args.loop:
+        raise ValueError("--loop syncs one account; run one timer per account instead")
+    if args.command in {*_FANOUT_READS, "sync"} or (
         args.command == "outbox" and args.outbox_command == "list"
     ):
-        return _emit(_merge(args, [(t, _collect(t) or []) for t in args.targets]), args)
+        return _collect_each(args)
     if args.command in {"thread", "tag"}:
         account, _, _ = split_handle(args.handle)
         if account is None:
@@ -381,8 +394,6 @@ def _run_fanout(args: argparse.Namespace) -> int:
         if args.command == "thread" and rows:
             rows = [_qualify(row, account) for row in rows]
         return _emit(rows, args)
-    if args.command == "sync":
-        return _sync_all(args)
     raise ValueError(f"{_command_name(args)} acts on one account; pass --account NAME, not all")
 
 
@@ -430,26 +441,29 @@ def _merge(
     return [row for row, _, _ in entries]
 
 
-def _sync_all(args: argparse.Namespace) -> int:
-    """Sync accounts sequentially; one failing account does not stop the rest."""
-    if args.loop:
-        raise ValueError("--loop syncs one account; run one timer per account instead")
-    rows: list[dict[str, Any]] = []
-    exit_code = 0
+def _collect_each(args: argparse.Namespace) -> int:
+    """Run one command on every account in turn and merge the rows.
+
+    A failing account is logged with its name and skipped; the rest still run
+    and print, and the first failure's exit code wins.
+    """
+    results: list[tuple[argparse.Namespace, list[dict[str, Any]]]] = []
+    failure = 0
     for target in args.targets:
         try:
-            result = _collect(target)
+            rows = _collect(target)
         except Exception as error:
             code = _exit_code(error)
             if code is None:
                 raise
             _log_cli_error(error, code, account=target.account_name)
-            exit_code = exit_code or code
+            failure = failure or code
             continue
-        rows.extend(_qualify(row, target.account_name) for row in result or [])
-    if rows:
-        sys.stdout.write(_render(rows, args))
-    return exit_code
+        results.append((target, rows or []))
+    merged = _merge(args, results)
+    # Sync with nothing to report (every lock held) is a success, not "no rows".
+    code = 0 if args.command == "sync" and not merged else _emit(merged, args)
+    return failure or code
 
 
 def _collect(args: argparse.Namespace) -> list[dict[str, Any]] | None:
@@ -492,7 +506,7 @@ def _dispatch(
             full=args.full,
         )
     if args.command == "thread":
-        return thread(connection, _local_handle(args), full=args.full)
+        return thread(connection, *_local_handle(args), full=args.full)
     if args.command == "tail":
         return search_messages(connection, peers=args.peer, limit=args.limit, full=args.full)
     if args.command == "digest":
@@ -619,34 +633,27 @@ def _outbox_command(
     raise ValueError(f"unknown outbox command: {args.outbox_command}")
 
 
-def _local_handle(args: argparse.Namespace) -> str:
-    """The handle as slug#msg_id after checking any account prefix (D3 in #29)."""
+def _local_handle(args: argparse.Namespace) -> tuple[str, int]:
+    """(slug, msg_id) of the handle after checking any account prefix (D3 in #29)."""
     account, slug, msg_id = split_handle(args.handle)
     if account is not None and account != args.account_name:
         raise ValueError(
             f"handle {args.handle!r} belongs to account {account!r}, "
             f"but the selected account is {args.account_name!r}"
         )
-    return f"{slug}#{msg_id}"
+    return slug, msg_id
 
 
-def _parse_handle(connection: sqlite3.Connection, handle: str) -> tuple[int, int]:
-    _, slug, msg_id = split_handle(handle)
+def _peer_id(connection: sqlite3.Connection, slug: str) -> int:
     row = connection.execute("SELECT peer_id FROM peers WHERE slug=?", (slug,)).fetchone()
     if row is None:
         raise ValueError(f"unknown peer: {slug}")
-    return int(row["peer_id"]), msg_id
-
-
-def _audit_detail(args: argparse.Namespace, detail: dict[str, Any]) -> str:
-    if args.audit_account is not None:
-        detail = {**detail, "account": args.audit_account}
-    return json.dumps(detail, separators=(",", ":"))
+    return int(row["peer_id"])
 
 
 def _tag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
-    handle = _local_handle(args)
-    peer_id, msg_id = _parse_handle(connection, handle)
+    slug, msg_id = _local_handle(args)
+    peer_id = _peer_id(connection, slug)
     if args.dry_run:
         return [{"id": args.handle, "tag": args.tag, "removed": args.remove, "dry_run": True}]
     with connection:
@@ -670,8 +677,8 @@ def _tag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dict[
                 int(time.time()),
                 args.actor,
                 "tag.remove" if args.remove else "tag.add",
-                handle,
-                _audit_detail(args, {"tag": args.tag}),
+                f"{slug}#{msg_id}",
+                audit_detail({"tag": args.tag}, args.audit_account),
             ),
         )
     return [{"id": args.handle, "tag": args.tag, "removed": args.remove, "dry_run": False}]
@@ -715,7 +722,9 @@ def _retag(connection: sqlite3.Connection, args: argparse.Namespace) -> list[dic
                 "human",
                 "tag.retag",
                 None,
-                _audit_detail(args, {"messages": len(rows), "rules": len(config.rules)}),
+                audit_detail(
+                    {"messages": len(rows), "rules": len(config.rules)}, args.audit_account
+                ),
             ),
         )
     return [{"retagged": len(rows), "rules": len(config.rules), "dry_run": False}]

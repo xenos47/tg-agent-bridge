@@ -217,6 +217,14 @@ def test_legacy_settings_are_one_account_named_default(tmp_path: Path) -> None:
             r"accounts\.work\.db is required",
         ),
         (
+            "accounts:\n  work:\n    db: ~\n    watchlist: b\n    session: c/s\n",
+            r"accounts\.work\.db is required",
+        ),
+        (
+            "accounts:\n  work:\n    db: a\n    watchlist: null\n    session: c/s\n",
+            r"accounts\.work\.watchlist is required",
+        ),
+        (
             "accounts:\n  work:\n    db: a\n    watchlist: b\n    session: c/s\n    token: x\n",
             r"unknown accounts\.work setting: token",
         ),

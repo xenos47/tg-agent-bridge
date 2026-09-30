@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from tests.factories import message, peer
-from tgbridge.cli.main import main
+from tgbridge.cli.main import _apply_user_settings, _parser, main
 from tgbridge.cli.query import split_handle
 from tgbridge.config import Config
 from tgbridge.db import connect, migrate
@@ -223,6 +223,62 @@ def test_several_accounts_without_default_need_account(
     assert main(["--settings", str(accounts), "search"]) == 2
     assert "pass --account with one of: personal, work or all" in capsys.readouterr().err
     assert main(["--settings", str(accounts), "--account", "work", "search"]) == 0
+
+
+def test_empty_account_environment_means_unset(
+    accounts: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("TGQ_ACCOUNT", "")
+    assert main(["--settings", str(accounts), "search", "--limit", "1"]) == 0
+    assert _jsonl(capsys.readouterr().out)[0]["text"] == "personal two"
+    assert main(["--settings", str(accounts), "--account", "", "search"]) == 2
+    assert "account name must not be empty" in capsys.readouterr().err
+
+
+def test_all_reads_survive_one_broken_mirror(
+    accounts: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "work" / "messages.sqlite").unlink()
+    prefix = ["--settings", str(accounts), "--account", "all"]
+    assert main([*prefix, "search"]) == 3
+    captured = capsys.readouterr()
+    assert _ids(captured.out) == ["personal:work-chat#2", "personal:work-chat#1"]
+    [error] = _jsonl(captured.err)
+    assert (error["event"], error["account"], error["exit_code"]) == ("cli_error", "work", 3)
+    assert "database does not exist" in str(error["error"])
+    assert main([*prefix, "doctor"]) == 3
+    captured = capsys.readouterr()
+    assert {row["account"] for row in _jsonl(captured.out)} == {"personal"}
+    assert _jsonl(captured.err)[0]["account"] == "work"
+
+
+def test_account_transport_settings_beat_environment(tmp_path: Path) -> None:
+    settings = tmp_path / "config.yaml"
+    settings.write_text(
+        "accounts:\n"
+        "  personal:\n"
+        "    db: personal/messages.sqlite\n"
+        "    watchlist: personal/watchlist.yaml\n"
+        "    session: personal/tgq.session\n"
+        "  work:\n"
+        "    db: work/messages.sqlite\n"
+        "    watchlist: work/watchlist.yaml\n"
+        "    session: work/tgq.session\n"
+        "    telegram:\n"
+        "      port: 443\n"
+        "    sync:\n"
+        "      interval: 900\n"
+    )
+    environment = {"TGQ_TELEGRAM_PORT": "5222", "TGQ_SYNC_INTERVAL": "120"}
+    selected = {}
+    for name in ("personal", "work"):
+        args = _parser().parse_args(["--settings", str(settings), "--account", name, "sync"])
+        _apply_user_settings(args, environ=environment)
+        selected[name] = (args.telegram_port, args.interval)
+    # The export fills in for `personal`, but never overrides `work`'s own values.
+    assert selected == {"personal": ("5222", 120), "work": (443, 900)}
 
 
 def test_unknown_account_exits_two(accounts: Path, capsys: pytest.CaptureFixture[str]) -> None:

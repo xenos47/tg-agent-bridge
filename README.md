@@ -109,15 +109,19 @@ accounts:
 - `secrets` defaults to `~/.config/tgq/secrets.env`. `TGQ_API_ID` /
   `TGQ_API_HASH` identify the Telegram *application*, not the account, so one
   pair can serve every account; the account itself is the session file.
-- Pick an account with `--account NAME` or `TGQ_ACCOUNT`; otherwise
-  `default_account` applies. With several accounts and no `default_account`,
+  An account's own `secrets` file takes precedence over exported
+  `TGQ_API_ID` / `TGQ_API_HASH`; without one, the environment wins as before.
+- Pick an account with `--account NAME` or `TGQ_ACCOUNT` (an empty
+  `TGQ_ACCOUNT=` counts as unset); otherwise `default_account` applies. With several accounts and no `default_account`,
   commands without `--account` fail with the list of names. A single account
   is its own default.
 - `--account all` is never implied. Read commands (`search`, `tail`,
-  `digest`, `thread`, `peers`, `doctor`, `outbox list`) accept it and merge
-  the mirrors: messages by time with `--limit` applied after the merge, every
-  row gains an `account` field, and message handles become
-  `account:slug#msg_id`. Output for a single account keeps plain `slug#msg_id`.
+  `digest`, `peers`, `doctor`, `outbox list`) accept it and merge the
+  mirrors: messages by time with `--limit` applied after the merge, every row
+  gains an `account` field, and message handles become `account:slug#msg_id`.
+  Output for a single account keeps plain `slug#msg_id`. An account whose
+  mirror cannot be read is logged as `cli_error` with its `account` and
+  skipped; the others still print, and the exit code reports the failure.
 - Handle-taking commands accept both forms. Under `--account all`, `thread`
   and `tag` need the qualified form and act on that one account.
 - Other writes (`send`, `outbox approve|reject|send`, `retag`,
@@ -130,6 +134,8 @@ accounts:
   `TGQ_CONFIG` and `TGQ_SESSION` variables are rejected once an `accounts`
   section exists, so an exported path cannot silently point every account at
   one mirror.
+- `TGQ_TELEGRAM_PORT` and `TGQ_SYNC_INTERVAL` still apply, but only to
+  accounts that do not set `telegram.port` / `sync.interval` themselves.
 - Tagging rules stay in each account's watchlist.
 
 Existing flat `paths` / `telegram` / `sync` settings keep working unchanged as
