@@ -80,6 +80,85 @@ work unchanged when no settings file exists. For foreground `tgq sync --loop`,
 `--interval` / `TGQ_SYNC_INTERVAL` / `sync.interval` share that precedence
 (default 60; the engine still floors at once per minute per peer).
 
+### Multiple accounts
+
+One settings file can describe several Telegram accounts. Each account has its
+own mirror, Telethon session, watchlist and, optionally, secrets file; nothing
+is shared between them, so a FloodWait or a broken session on one account never
+blocks another.
+
+```yaml
+default_account: personal
+
+accounts:
+  personal:
+    db: ~/.local/share/tgq/personal/messages.sqlite
+    session: ~/.local/share/tgq/personal/tgq.session
+    watchlist: ~/.config/tgq/personal/watchlist.yaml
+    secrets: ~/.config/tgq/personal/secrets.env   # optional
+    telegram: {port: 5222}                         # optional
+  work:
+    db: ~/.local/share/tgq/work/messages.sqlite
+    session: ~/.local/share/tgq/work/tgq.session
+    watchlist: ~/.config/tgq/work/watchlist.yaml
+```
+
+- `db`, `session` and `watchlist` are required per account. Accounts must not
+  share a database or a session directory, because `sync.lock` lives next to
+  the session file.
+- `secrets` defaults to `~/.config/tgq/secrets.env`. `TGQ_API_ID` /
+  `TGQ_API_HASH` identify the Telegram *application*, not the account, so one
+  pair can serve every account; the account itself is the session file.
+  An account's own `secrets` file, when set, is that account's only source of
+  `TGQ_API_ID` / `TGQ_API_HASH`: it must exist and set both, and is never
+  topped up from the environment. Without one, the environment and the default
+  secrets file apply as before.
+- Pick an account with `--account NAME` or `TGQ_ACCOUNT` (an empty
+  `TGQ_ACCOUNT=` counts as unset); otherwise `default_account` applies. With several accounts and no `default_account`,
+  commands without `--account` fail with the list of names. A single account
+  is its own default.
+- `--account all` is never implied. Read commands (`search`, `tail`,
+  `digest`, `peers`, `doctor`, `outbox list`) accept it and merge the
+  mirrors: messages by time with `--limit` applied after the merge, every row
+  gains an `account` field, and message handles become `account:slug#msg_id`.
+  Output for a single account keeps plain `slug#msg_id`. An account whose
+  mirror cannot be read (or is missing: reads never create one) is logged as
+  `cli_error` with its `account` and skipped; the others still print, and the
+  exit code reports the failure. An error in the query itself (`--since`,
+  `--q` syntax) is reported once, before any mirror is read.
+- Handle-taking commands accept both forms. With named accounts, `thread`
+  and `tag` under `--account all` need the qualified form and act on that one
+  account. Flat settings never print an account prefix, so the whole body of
+  a handle is the slug (`team:core#42` stays that peer).
+- Other writes (`send`, `outbox approve|reject|send`, `retag`,
+  `watchlist resolve`) always target one account and reject `all`.
+  `sync --account all` syncs the accounts one after another and keeps going
+  when one fails (the exit code reports the first failure); prefer one timer
+  per account.
+- Per-account paths are set in the settings file. `--db`, `--config` and
+  `--session` still override the one selected account and are rejected with
+  `--account all`; the `TGQ_DB`, `TGQ_CONFIG` and `TGQ_SESSION` variables are
+  rejected once an `accounts` section exists, so an exported path cannot
+  silently point every account at one mirror. A variable is only rejected
+  when it would apply: the matching CLI option overrides it, and a command
+  without that option (`search` has no `--session`) ignores it. Like
+  `TGQ_ACCOUNT=`, an empty `TGQ_*` variable counts as unset. With flat settings
+  `--account all` is plainly the one `default` account: nothing is merged or
+  prefixed, every command accepts it, and the options and variables apply.
+- `TGQ_TELEGRAM_PORT` and `TGQ_SYNC_INTERVAL` override every account's
+  `telegram.port` / `sync.interval`, exactly as they override flat settings:
+  the port is a property of the host's network, not of the account.
+- Tagging rules stay in each account's watchlist.
+
+Existing flat `paths` / `telegram` / `sync` settings keep working unchanged as
+one account named `default`. To add a second account, move those values under
+`accounts.default` (or another name) and add the new account next to it; the
+flat keys and `accounts` cannot be mixed. With an `accounts` section, peer
+slugs must not contain `:`, which separates the account in
+`account:slug#msg_id`; flat settings keep accepting existing slugs with `:`.
+A mirror's slugs are immutable, so a peer whose slug contains `:` must be
+renamed in the watchlist and its account started from a fresh mirror.
+
 Resolve a peer named by the human before the first sync. This command reads only
 peer metadata, does not require `--db`, and does not add anything to the mirror:
 
@@ -128,6 +207,16 @@ systemctl --user enable --now tgq-sync.timer
 systemctl --user status tgq-sync.timer
 ```
 
+With several accounts, use the templated units instead, one instance per
+account name:
+
+```bash
+cp contrib/systemd/tgq-sync@.service contrib/systemd/tgq-sync@.timer \
+  ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tgq-sync@personal.timer tgq-sync@work.timer
+```
+
 **launchd (macOS):**
 
 ```bash
@@ -136,6 +225,10 @@ cp contrib/launchd/com.tgq.sync.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.tgq.sync.plist
 launchctl list com.tgq.sync
 ```
+
+For several accounts, copy the plist once per account with its own `Label`
+(for example `com.tgq.sync.work`) and add `--account` and the name before
+`sync` in `ProgramArguments`.
 
 Overlapping runs take a non-blocking flock next to the session file
 (`sync.lock`). If another sync holds the lock, the new process logs and exits 0
@@ -249,7 +342,8 @@ This is a userbot acting as a real person. Defaults and hard boundaries:
 - Unattended auto-replies
 - Syncing or scraping peers outside the watchlist
 - Aggressive polling faster than about once per minute per peer
-- FloodWait evasion via session/account rotation
+- FloodWait evasion via session/account rotation (multiple accounts mirror
+  different people's chats; they are never pooled to spread one workload)
 
 Telegram limits accounts by behavior. Convenience is not worth a locked human account.
 

@@ -86,3 +86,13 @@ async def test_sender_surfaces_policy_denial(db: sqlite3.Connection) -> None:
     with pytest.raises(PolicyError):
         await send_approved(outbox, Client())
     assert db.execute("SELECT status FROM outbox").fetchone()[0] == "failed"
+
+
+def test_audit_detail_records_named_account(db: sqlite3.Connection) -> None:
+    import json
+
+    peer(db, slug="lena", sendable=True)
+    Outbox(db, config()).enqueue("lena", "plain")
+    Outbox(db, config(), account="work").enqueue("lena", "named")
+    details = [json.loads(row[0]) for row in db.execute("SELECT detail FROM audit ORDER BY id")]
+    assert details == [{"peer": "lena"}, {"peer": "lena", "account": "work"}]

@@ -12,6 +12,13 @@ from tgbridge.config import Config
 from tgbridge.db import transaction
 
 
+def audit_detail(detail: dict[str, Any], account: str | None) -> str:
+    """Audit `detail` JSON; named-account mode records which account acted."""
+    if account is not None:
+        detail = {**detail, "account": account}
+    return json.dumps(detail, separators=(",", ":"))
+
+
 @dataclass(frozen=True)
 class OutboxItem:
     item_id: int
@@ -27,10 +34,12 @@ class Outbox:
         config: Config,
         *,
         now: Callable[[], int] = lambda: int(time.time()),
+        account: str | None = None,
     ) -> None:
         self.connection = connection
         self.config = config
         self.now = now
+        self.account = account
 
     def enqueue(
         self,
@@ -191,5 +200,5 @@ class Outbox:
     def _audit(self, actor: str, action: str, target: str, detail: dict[str, Any]) -> None:
         self.connection.execute(
             "INSERT INTO audit(ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)",
-            (self.now(), actor, action, target, json.dumps(detail, separators=(",", ":"))),
+            (self.now(), actor, action, target, audit_detail(detail, self.account)),
         )

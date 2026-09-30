@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from tgbridge.settings import environment_value
 from tgbridge.sync.models import Peer, SyncPolicy, TagRule
 
 _DAY = 86400
@@ -170,27 +171,32 @@ def _peer_policy(
     return policies[name]
 
 
-def load_config(
-    path: str | Path,
-    *,
-    environ: Mapping[str, str] | None = None,
-    telegram_port: int | str | None = None,
-) -> Config:
-    """Load a privacy-bounded watchlist and policy configuration."""
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    environment = os.environ if environ is None else environ
-    policies, default_policy = _policies(raw)
-    telegram = raw.get("telegram", {})
-    configured_port = telegram.get("port", 443)
-    selected_port = (
-        telegram_port
-        if telegram_port is not None
-        else environment.get("TGQ_TELEGRAM_PORT", configured_port)
-    )
-    peers = tuple(
+def _slug(item: Mapping[str, Any], *, named_accounts: bool) -> str:
+    # With named accounts ':' separates the account in `account:slug#msg_id`, so
+    # it is refused there. Flat settings keep accepting it, and nothing stricter
+    # is enforced: existing mirrors' slugs are immutable.
+    slug = str(item["slug"])
+    if not slug.strip():
+        raise ValueError(f"peer slug {slug!r} must be non-empty")
+    if named_accounts and ":" in slug:
+        raise ValueError(
+            f"peer slug {slug!r} must not contain ':' with named accounts; a mirror's "
+            "slugs are immutable, so rename it in the watchlist and start that account "
+            "from a fresh mirror"
+        )
+    return slug
+
+
+def _peers(
+    raw: Mapping[str, Any],
+    named_accounts: bool,
+    policies: Mapping[str, SyncPolicy],
+    default_policy: SyncPolicy,
+) -> tuple[Peer, ...]:
+    return tuple(
         Peer(
             peer_id=int(item["id"]),
-            slug=str(item["slug"]),
+            slug=_slug(item, named_accounts=named_accounts),
             kind=str(item["kind"]),
             title=str(item.get("title", item["slug"])),
             username=item.get("username"),
@@ -200,7 +206,10 @@ def load_config(
         )
         for item in raw.get("peers") or []
     )
-    rules = tuple(
+
+
+def _rules(raw: Mapping[str, Any]) -> tuple[TagRule, ...]:
+    return tuple(
         TagRule(
             rule_id=str(item["id"]),
             tag=str(item["tag"]),
@@ -209,6 +218,39 @@ def load_config(
         )
         for item in raw.get("rules", [])
     )
+
+
+def load_config(
+    path: str | Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+    telegram_port: int | str | None = None,
+    named_accounts: bool = False,
+) -> Config:
+    """Load a privacy-bounded watchlist and policy configuration."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"watchlist {path} must be a YAML mapping")
+    environment = os.environ if environ is None else environ
+    policies, default_policy = _policies(raw)
+    telegram = raw.get("telegram", {})
+    configured_port = telegram.get("port", 443)
+    selected_port = (
+        telegram_port
+        if telegram_port is not None
+        else environment_value(environment, "TGQ_TELEGRAM_PORT") or configured_port
+    )
+    try:
+        peers, rules = _peers(raw, named_accounts, policies, default_policy), _rules(raw)
+    except (KeyError, TypeError) as error:
+        # A missing key or a non-mapping entry is a usage error, not a crash.
+        raise ValueError(
+            f"watchlist {path}: malformed peer or rule entry ({type(error).__name__}: {error})"
+        ) from error
+    except ValueError as error:
+        # A bad value (`id: abc`, a slug with ':') already says what is wrong;
+        # it only lacks which file.
+        raise ValueError(f"watchlist {path}: {error}") from error
     limits = raw.get("rate_limits", {})
     return Config(
         peers=peers,

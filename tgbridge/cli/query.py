@@ -22,6 +22,22 @@ def parse_time(value: str, *, now: int | None = None) -> int:
         raise ValueError(f"invalid time value: {value}") from error
 
 
+HANDLE_FORMAT = "slug#msg_id or account:slug#msg_id"
+
+
+def split_handle(handle: str) -> tuple[str, int]:
+    """Split `slug#msg_id` or `account:slug#msg_id` at the last '#'.
+
+    Returns (body, msg_id). Whether a ':' in the body starts an account prefix
+    depends on the settings (flat setups keep slugs with ':'), so the caller
+    decides that.
+    """
+    body, separator, raw_id = handle.rpartition("#")
+    if not separator or not raw_id.isdigit() or not body:
+        raise ValueError(f"handle must be {HANDLE_FORMAT}")
+    return body, int(raw_id)
+
+
 def search_messages(
     connection: sqlite3.Connection,
     *,
@@ -101,12 +117,8 @@ def search_messages(
 
 
 def thread(
-    connection: sqlite3.Connection, handle: str, *, full: bool = False
+    connection: sqlite3.Connection, slug: str, msg_id: int, *, full: bool = False
 ) -> list[dict[str, Any]]:
-    slug, separator, raw_id = handle.rpartition("#")
-    if not separator or not raw_id.isdigit():
-        raise ValueError("handle must be slug#msg_id")
-    msg_id = int(raw_id)
     rows = connection.execute(
         f"""
         WITH RECURSIVE ancestors(peer_id, msg_id, reply_to, depth) AS (

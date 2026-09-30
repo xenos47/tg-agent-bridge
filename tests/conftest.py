@@ -15,6 +15,7 @@ def isolate_tgq_path_settings(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     for name in (
         "TGQ_SETTINGS",
+        "TGQ_ACCOUNT",
         "TGQ_DB",
         "TGQ_CONFIG",
         "TGQ_SESSION",

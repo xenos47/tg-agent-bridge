@@ -1,0 +1,18 @@
+[Unit]
+Description=tg-agent-bridge oneshot Telegram sync for account %i
+Documentation=https://github.com/xenos47/tg-agent-bridge
+# No After=network-online.target: a user manager has no such target. A sync
+# that starts before the network is up fails and the timer retries it.
+
+[Service]
+Type=oneshot
+# %i is an account name from the `accounts` section of ~/.config/tgq/config.yaml.
+# Replace with an absolute path to tgq, or:
+#   ExecStart=/usr/bin/uv run --directory /path/to/tg-agent-bridge tgq --account %i sync
+ExecStart=tgq --account %i sync
+# Optional: EnvironmentFile=%h/.config/tgq/%i/secrets.env
+# Optional; overrides telegram.port in the settings:
+#   Environment=TGQ_TELEGRAM_PORT=5222
+
+[Install]
+WantedBy=default.target

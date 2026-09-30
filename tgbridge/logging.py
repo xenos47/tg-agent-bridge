@@ -16,6 +16,7 @@ _BASE64 = re.compile(
     r"(?<![A-Za-z0-9_+/-])[A-Za-z0-9_+/-]{40,}={0,2}(?![A-Za-z0-9_+/-])"
 )
 _SAFE_FIELDS = (
+    "account",
     "role",
     "transport",
     "dc",

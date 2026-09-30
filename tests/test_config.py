@@ -123,3 +123,35 @@ def test_invalid_policy_config_is_rejected(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         load_config(config_file(tmp_path, content + "\n"), environ={})
+
+
+@pytest.mark.parametrize(
+    "slug", ["work-chat", "devops_jobs_feed", "рабочий-чат", "Chat2", "team.chat", "ops chat"]
+)
+def test_peer_slug_accepts_existing_slugs(tmp_path: Path, slug: str) -> None:
+    content = f"peers:\n  - slug: {slug}\n    id: 1\n    kind: group\n"
+    assert load_config(config_file(tmp_path, content), environ={}).peers[0].slug == slug
+
+
+def test_peer_slug_rejects_blank(tmp_path: Path) -> None:
+    content = "peers:\n  - slug: ' '\n    id: 1\n    kind: group\n"
+    with pytest.raises(ValueError, match="must be non-empty"):
+        load_config(config_file(tmp_path, content), environ={})
+
+
+def test_peer_slug_colon_is_refused_only_with_named_accounts(tmp_path: Path) -> None:
+    path = config_file(tmp_path, "peers:\n  - slug: 'team:core'\n    id: 1\n    kind: group\n")
+    assert load_config(path, environ={}).peers[0].slug == "team:core"
+    with pytest.raises(ValueError, match=r"watchlist .*must not contain ':'.*fresh mirror"):
+        load_config(path, environ={}, named_accounts=True)
+
+
+def test_watchlist_root_must_be_a_mapping(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be a YAML mapping"):
+        load_config(config_file(tmp_path, "- slug: jobs\n"), environ={})
+
+
+def test_bad_peer_value_names_the_watchlist(tmp_path: Path) -> None:
+    path = config_file(tmp_path, "peers:\n  - {slug: ops, id: abc, kind: group}\n")
+    with pytest.raises(ValueError, match=r"^watchlist .*invalid literal for int\(\)"):
+        load_config(path, environ={})
